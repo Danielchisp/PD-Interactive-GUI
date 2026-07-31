@@ -314,11 +314,54 @@ export default function App() {
 
   const closeSource = useCallback(() => setSource(null), [])
 
-  // Drop a signal on the canvas => read that row and plot it.
+  // Drop a signal or humidity dataset on the canvas => read data and plot it.
   const onDropSignal = useCallback(
     async (payload, pos) => {
       try {
-        const { test, path, row = 0, datasetName = 'data', label } = payload
+        const { kind, test, path, row = 0, datasetName = 'data', label } = payload
+
+        if (kind === 'humidity' || path === 'humidity') {
+          const res = await hdf5.readHumidity(test)
+          const xcol = 'Tiempo (s)'
+          
+          // Calculate relative seconds from start timestamp
+          const t0 = res.timestamps[0]
+          const x = new Float64Array(res.nSamples)
+          for (let i = 0; i < res.nSamples; i += 1) {
+            x[i] = res.timestamps[i] - t0
+          }
+
+          let yData = res.humidity
+          let ycol = `Humedad (%)`
+          let cardTitle = `Humedad vs Tiempo (${test})`
+
+          if (datasetName === 'temperature') {
+            yData = res.temperature || res.humidity
+            ycol = `Temperatura (°C)`
+            cardTitle = `Temperatura vs Tiempo (${test})`
+          } else if (datasetName === 'timestamps') {
+            yData = res.timestamps
+            ycol = `Timestamp (s)`
+            cardTitle = `Timestamps vs Tiempo (${test})`
+          }
+
+          const id = nextDatasetId()
+          putDataset({
+            id,
+            name: `${ycol} - ${test}`,
+            columns: [xcol, ycol],
+            rowCount: res.nSamples,
+            data: { [xcol]: x, [ycol]: yData },
+            meta: { test, t0 },
+          })
+          addCard({
+            title: cardTitle,
+            series: [{ datasetId: id, xCol: xcol, yCol: ycol, name: ycol }],
+            at: pos,
+          })
+          return
+        }
+
         const res = await hdf5.readSignal(test, path, row, datasetName)
         const xcol = 't (muestras)'
         const ycol = label || `${path} · sig ${row}`

@@ -39,5 +39,6 @@ export const hdf5 = {
   testChildren: (test) => call('testChildren', { test }),
   chunks: (test) => call('chunks', { test }),
   readSignal: (test, path, row, datasetName) => call('readSignal', { test, path, row, datasetName }),
+  readHumidity: (test) => call('readHumidity', { test }),
   signal: (test, chunk, row) => call('signal', { test, chunk, row }),
 }

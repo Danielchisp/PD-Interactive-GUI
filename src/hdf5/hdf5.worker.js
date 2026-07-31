@@ -198,12 +198,44 @@ function readSignalData(testName, path, row = 0, datasetName = 'data') {
   }
 }
 
+function readHumidityData(testName) {
+  const g = h5file.get(`${testName}/humidity`)
+  if (!g) {
+    throw new Error(`Grupo humidity no encontrado en: ${testName}/humidity`)
+  }
+  const humDset = h5file.get(`${testName}/humidity/humidity`)
+  const tempDset = h5file.get(`${testName}/humidity/temperature`)
+  const timeDset = h5file.get(`${testName}/humidity/timestamps`)
+
+  if (!humDset || !timeDset) {
+    throw new Error(`Datasets de humedad o timestamps no encontrados en: ${testName}/humidity`)
+  }
+
+  const humidity = Float64Array.from(humDset.value)
+  const timestamps = Float64Array.from(timeDset.value)
+  const temperature = tempDset ? Float64Array.from(tempDset.value) : null
+
+  const nSamples = humidity.length
+
+  const transfer = [humidity.buffer, timestamps.buffer]
+  if (temperature) transfer.push(temperature.buffer)
+
+  return {
+    humidity,
+    temperature,
+    timestamps,
+    nSamples,
+    transfer,
+  }
+}
+
 // --- Message bridge ---------------------------------------------------------
 const handlers = {
   open: (p) => openFile(p.file),
   testChildren: (p) => listTestChildren(p.test),
   chunks: (p) => listTestChildren(p.test), // retrocompatibilidad
   readSignal: (p) => readSignalData(p.test, p.path, p.row, p.datasetName),
+  readHumidity: (p) => readHumidityData(p.test),
   signal: (p) => readSignalData(p.test, `${p.chunk}/signals`, p.row, 'data'), // retrocompatibilidad
 }
 

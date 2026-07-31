@@ -111,22 +111,63 @@ function ChildGroupNode({ testName, item }) {
 
   // Si tiene nSignals > 0 (ej. ae con 12103 o uhf con 89 señales), mostramos lista de señales
   const isSignalMatrix = item.nSignals > 0
+  const isHumidityGroup = item.name === 'humidity'
+
+  // Si es un grupo especial como humidity, podemos permitir arrastrarlo directamente desde la fila del grupo
+  const draggableProps = isHumidityGroup
+    ? {
+        draggable: true,
+        onDragStart: (e) => {
+          e.dataTransfer.effectAllowed = 'copy'
+          e.dataTransfer.setData(
+            'application/x-hdf5-signal',
+            JSON.stringify({
+              kind: 'humidity',
+              test: testName,
+              path: item.name,
+              datasetName: 'humidity',
+              row: 0,
+              label: `Humedad (${testName})`,
+            }),
+          )
+        },
+      }
+    : {}
 
   return (
     <div className="ds-node">
-      <button className="ds-row ds-chunk" onClick={toggle}>
-        <Caret open={open} />
-        <span className="ds-label" style={{ fontWeight: 'bold' }}>
-          {item.name}
-        </span>
-        {isSignalMatrix ? (
-          <span className="ds-count">
-            {item.nSignals} señales ({item.nSamples} pts)
+      <div
+        className="ds-row ds-chunk"
+        style={{ cursor: isHumidityGroup ? 'grab' : 'pointer', display: 'flex', alignItems: 'center' }}
+        {...draggableProps}
+      >
+        <button
+          onClick={toggle}
+          style={{
+            background: 'none',
+            border: 'none',
+            color: 'inherit',
+            display: 'flex',
+            alignItems: 'center',
+            cursor: 'pointer',
+            padding: 0,
+            flex: 1,
+            textAlign: 'left',
+          }}
+        >
+          <Caret open={open} />
+          <span className="ds-label" style={{ fontWeight: 'bold' }}>
+            {item.name}
           </span>
-        ) : item.datasets.length > 0 ? (
-          <span className="ds-count">{item.datasets.length} vars</span>
-        ) : null}
-      </button>
+          {isSignalMatrix ? (
+            <span className="ds-count">
+              {item.nSignals} señales ({item.nSamples} pts)
+            </span>
+          ) : item.datasets.length > 0 ? (
+            <span className="ds-count">{item.datasets.length} vars</span>
+          ) : null}
+        </button>
+      </div>
       {open && (
         <div className="ds-children">
           {isSignalMatrix ? (
@@ -153,7 +194,11 @@ function ChildGroupNode({ testName, item }) {
 }
 
 function DatasetItemNode({ testName, path, datasetName }) {
-  const label = `${path} / ${datasetName}`
+  const isHumidityGroup = path === 'humidity'
+  const label = isHumidityGroup
+    ? `Humedad (${testName})`
+    : `${path} / ${datasetName}`
+
   return (
     <div
       className="ds-signal"
@@ -164,6 +209,7 @@ function DatasetItemNode({ testName, path, datasetName }) {
         e.dataTransfer.setData(
           'application/x-hdf5-signal',
           JSON.stringify({
+            kind: isHumidityGroup ? 'humidity' : 'signal',
             test: testName,
             path,
             datasetName,
@@ -175,6 +221,7 @@ function DatasetItemNode({ testName, path, datasetName }) {
     >
       <span className="ds-sig-dot" />
       {datasetName}
+      {isHumidityGroup && <span className="ds-sig-row"> (serie temporal)</span>}
     </div>
   )
 }
