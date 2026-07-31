@@ -97,9 +97,20 @@ function openFile(file) {
 
   const tests = h5file.keys().map((name) => {
     const g = h5file.get(name)
+    const subKeys = g.keys()
+    
+    // Inspeccionamos si los subgrupos son directamente tipos de señal (ae, uhf, humidity)
+    // o si son chunks (chunk_000000)
+    let mode = 'groups' // 'chunks' | 'groups'
+    if (subKeys.some((k) => k.startsWith('chunk_'))) {
+      mode = 'chunks'
+    }
+
     return {
       name,
-      nChunks: g.keys().length,
+      mode,
+      nChildren: subKeys.length,
+      childrenKeys: subKeys,
       date: attrVal(g, 'date') ?? name,
       chunkDuration: Number(attrVal(g, 'chunk_duration_s') ?? 0),
       description: attrVal(g, 'description') ?? '',
@@ -108,50 +119,198 @@ function openFile(file) {
   return { fileName: file.name, tests }
 }
 
-function listChunks(testName) {
+function listTestChildren(testName) {
   const g = h5file.get(testName)
-  const chunks = g.keys().map((name) => ({ name }))
-  return { chunks }
+  const keys = g.keys()
+  
+  const items = keys.map((key) => {
+    const item = h5file.get(`${testName}/${key}`)
+    const isGroup = item instanceof h5wasm.Group
+    let datasets = []
+    let nSignals = 0
+    let nSamples = 0
+
+    if (isGroup) {
+      const subKeys = item.keys()
+      // Si contiene 'data', es un dataset de señales (ej. ae/data, uhf/data o chunk_XX/signals/data)
+      if (subKeys.includes('data')) {
+        const dset = h5file.get(`${testName}/${key}/data`)
+        if (dset && dset.shape) {
+          if (dset.shape.length === 2) {
+            [nSignals, nSamples] = dset.shape
+          } else if (dset.shape.length === 1) {
+            nSignals = 1
+            nSamples = dset.shape[0]
+          }
+        }
+      } else if (subKeys.includes('signals')) {
+        const dset = h5file.get(`${testName}/${key}/signals/data`)
+        if (dset && dset.shape) {
+          [nSignals, nSamples] = dset.shape
+        }
+      } else {
+        // Ejemplo: humidity (contiene humidity, temperature, timestamps)
+        datasets = subKeys
+      }
+    }
+
+    return {
+      name: key,
+      isGroup,
+      datasets,
+      nSignals,
+      nSamples,
+      attrs: item.attrs ? Object.fromEntries(Object.entries(item.attrs).map(([k, v]) => [k, v.value])) : {},
+    }
+  })
+
+  return { items }
 }
 
-function chunkInfo(testName, chunkName) {
-  const ch = h5file.get(`${testName}/${chunkName}`)
-  const dset = h5file.get(`${testName}/${chunkName}/signals/data`)
-  const [nSignals, nSamples] = dset.shape
-  const chunkDuration = Number(attrVal(h5file.get(testName), 'chunk_duration_s') ?? 0)
-  return {
-    nSignals: Number(attrVal(ch, 'n_signals') ?? nSignals),
-    signalOffset: Number(attrVal(ch, 'signal_offset') ?? 0),
-    isBaseline: Boolean(attrVal(ch, 'is_baseline')),
-    nSamples,
-    chunkDuration,
-    dt: chunkDuration && nSamples ? chunkDuration / nSamples : 1,
+function readSignalData(testName, path, row = 0, datasetName = 'data') {
+  const fullPath = datasetName ? `${testName}/${path}/${datasetName}` : `${testName}/${path}`
+  const dset = h5file.get(fullPath)
+  if (!dset) {
+    throw new Error(`Dataset no encontrado en: ${fullPath}`)
   }
-}
 
-function readSignal(testName, chunkName, row) {
-  const dset = h5file.get(`${testName}/${chunkName}/signals/data`)
-  const [, nSamples] = dset.shape
-  const slab = dset.slice([[row, row + 1], [0, nSamples]])
-  // Copy into an owned buffer (slab may be a view on the WASM heap) so it can
-  // be transferred without detaching WASM memory.
-  const y = Float32Array.from(slab)
-  const info = chunkInfo(testName, chunkName)
+  let y
+  let nSamples = 0
+
+  if (dset.shape.length === 2) {
+    nSamples = dset.shape[1]
+    const slab = dset.slice([[row, row + 1], [0, nSamples]])
+    y = Float32Array.from(slab)
+  } else if (dset.shape.length === 1) {
+    nSamples = dset.shape[0]
+    const slab = dset.value
+    y = Float32Array.from(slab)
+  } else {
+    throw new Error(`Forma de dataset no soportada: ${dset.shape}`)
+  }
+
   return {
     y,
     nSamples,
-    dt: info.dt,
-    globalIndex: info.signalOffset + row,
+    dt: 1,
+    row,
     transfer: [y.buffer],
+  }
+}
+
+function readGroupSummary(testName, path) {
+  const fullPath = `${testName}/${path}/data`
+  const timePath = `${testName}/${path}/timestamps`
+  const dset = h5file.get(fullPath)
+  const tDset = h5file.get(timePath)
+
+  if (!dset) {
+    throw new Error(`Dataset 'data' no encontrado en ${testName}/${path}`)
+  }
+
+  const [nSignals, nSamples] = dset.shape
+
+  let timestamps = null
+  if (tDset) {
+    timestamps = Float64Array.from(tDset.value)
+  }
+  const hasTimestamps = timestamps && timestamps.length === nSignals
+  const t0 = hasTimestamps ? timestamps[0] : 0
+
+  const totalPts = nSignals * 4
+  const xData = new Float64Array(totalPts)
+  const yData = new Float64Array(totalPts)
+
+  // Procesar fila a fila directamente de la memoria HDF5 (Lazy VFS) para no reservar 2 GB de RAM
+  for (let i = 0; i < nSignals; i++) {
+    const slab = dset.slice([[i, i + 1], [0, nSamples]])
+    const row = Float32Array.from(slab)
+
+    let minVal = Infinity
+    let maxVal = -Infinity
+    let minIdx = 0
+    let maxIdx = 0
+
+    for (let j = 0; j < nSamples; j++) {
+      const val = row[j]
+      if (val < minVal) {
+        minVal = val
+        minIdx = j
+      }
+      if (val > maxVal) {
+        maxVal = val
+        maxIdx = j
+      }
+    }
+
+    const tBase = hasTimestamps ? (timestamps[i] - t0) : i
+    const baseIdx = i * 4
+
+    xData[baseIdx] = tBase
+    yData[baseIdx] = row[0]
+
+    xData[baseIdx + 1] = tBase + (minIdx / nSamples) * 0.001
+    yData[baseIdx + 1] = minVal
+
+    xData[baseIdx + 2] = tBase + (maxIdx / nSamples) * 0.001
+    yData[baseIdx + 2] = maxVal
+
+    xData[baseIdx + 3] = tBase + 0.001
+    yData[baseIdx + 3] = row[nSamples - 1]
+  }
+
+  return {
+    testName,
+    path,
+    nSignals,
+    totalPts,
+    xData,
+    yData,
+    transfer: [xData.buffer, yData.buffer],
+  }
+}
+
+function readHumidityData(testName) {
+  const g = h5file.get(`${testName}/humidity`)
+  if (!g) {
+    throw new Error(`Grupo humidity no encontrado en: ${testName}/humidity`)
+  }
+  const humDset = h5file.get(`${testName}/humidity/humidity`)
+  const tempDset = h5file.get(`${testName}/humidity/temperature`)
+  const timeDset = h5file.get(`${testName}/humidity/timestamps`)
+
+  if (!humDset || !timeDset) {
+    throw new Error(`Datasets de humedad o timestamps no encontrados en: ${testName}/humidity`)
+  }
+
+  const humidity = Float64Array.from(humDset.value)
+  const timestamps = Float64Array.from(timeDset.value)
+  const temperature = tempDset ? Float64Array.from(tempDset.value) : null
+
+  const nSamples = humidity.length
+
+  const transfer = [humidity.buffer, timestamps.buffer]
+  if (temperature) transfer.push(temperature.buffer)
+
+  return {
+    humidity,
+    temperature,
+    timestamps,
+    nSamples,
+    transfer,
   }
 }
 
 // --- Message bridge ---------------------------------------------------------
 const handlers = {
   open: (p) => openFile(p.file),
-  chunks: (p) => listChunks(p.test),
-  chunkInfo: (p) => chunkInfo(p.test, p.chunk),
-  signal: (p) => readSignal(p.test, p.chunk, p.row),
+  testChildren: (p) => listTestChildren(p.test),
+  chunks: (p) => listTestChildren(p.test), // retrocompatibilidad
+  readSignal: (p) => readSignalData(p.test, p.path, p.row, p.datasetName),
+  readHumidity: (p) => readHumidityData(p.test),
+  readGroupSummary: (p) => readGroupSummary(p.test, p.path),
+  readGroupMatrix: (p) => readGroupSummary(p.test, p.path),
+  signal: (p) => readSignalData(p.test, `${p.chunk}/signals`, p.row, 'data'), // retrocompatibilidad
 }
 
 self.onmessage = async (e) => {

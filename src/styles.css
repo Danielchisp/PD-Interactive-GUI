@@ -321,8 +321,12 @@ body {
   margin-left: 22px;
 }
 
-.ds-signal {
+.ds-signals .ds-signal {
   position: absolute;
+}
+
+.ds-signal {
+  position: relative;
   left: 0;
   right: 0;
   height: 22px;

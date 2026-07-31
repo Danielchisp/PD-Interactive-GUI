@@ -36,7 +36,11 @@ function call(type, payload, transfer = []) {
 
 export const hdf5 = {
   open: (file) => call('open', { file }),
+  testChildren: (test) => call('testChildren', { test }),
   chunks: (test) => call('chunks', { test }),
-  chunkInfo: (test, chunk) => call('chunkInfo', { test, chunk }),
+  readSignal: (test, path, row, datasetName) => call('readSignal', { test, path, row, datasetName }),
+  readHumidity: (test) => call('readHumidity', { test }),
+  readGroupSummary: (test, path) => call('readGroupSummary', { test, path }),
+  readGroupMatrix: (test, path) => call('readGroupSummary', { test, path }),
   signal: (test, chunk, row) => call('signal', { test, chunk, row }),
 }

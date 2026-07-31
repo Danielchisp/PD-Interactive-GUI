@@ -6,6 +6,7 @@ import DataSourcePanel from './components/DataSourcePanel.jsx'
 import ThemeToggle from './components/ThemeToggle.jsx'
 import { hdf5 } from './hdf5/hdf5Client.js'
 import { compute } from './compute/computeClient.js'
+import { METRICS } from './compute/metrics.js'
 import { opsFor } from './compute/operations.js'
 import {
   deleteDataset,
@@ -314,14 +315,122 @@ export default function App() {
 
   const closeSource = useCallback(() => setSource(null), [])
 
-  // Drop a signal on the canvas => read that row and plot it.
+  // Drop a signal, humidity dataset or full group series on the canvas => read data and plot it.
   const onDropSignal = useCallback(
     async (payload, pos) => {
       try {
-        const { test, chunk, row } = payload
-        const res = await hdf5.signal(test, chunk, row)
-        const xcol = 't (s)'
-        const ycol = `sig ${res.globalIndex}`
+        const { kind, test, path, row = 0, datasetName = 'data', metricKey, label } = payload
+
+        if (kind === 'groupSeries') {
+          // Read group and downsample each signal to 4 points (min, max, etc.) directly in hdf5 worker
+          const summaryRes = await hdf5.readGroupSummary(test, path)
+
+          const xcol = 'Tiempo (s)'
+          const ycol = `Amplitud (${path.toUpperCase()})`
+
+          const id = nextDatasetId()
+          putDataset({
+            id,
+            name: `${path.toUpperCase()} continuo - ${test}`,
+            columns: [xcol, ycol],
+            rowCount: summaryRes.totalPts,
+            data: { [xcol]: summaryRes.xData, [ycol]: summaryRes.yData },
+            meta: { test, path, nSignals: summaryRes.nSignals },
+          })
+
+          addCard({
+            title: `Serie ${path.toUpperCase()} (${summaryRes.nSignals} señales) · ${test}`,
+            series: [{ datasetId: id, xCol: xcol, yCol: ycol, name: ycol }],
+            at: pos,
+          })
+          return
+        }
+
+        if (kind === 'groupMetric') {
+          // Read full group matrix and compute chosen metric across all signals in background worker
+          const groupRes = await hdf5.readGroupMatrix(test, path)
+          const transferables = [groupRes.yMatrix.buffer]
+          if (groupRes.timestamps) transferables.push(groupRes.timestamps.buffer)
+
+          const compRes = await compute.metricGroup(
+            {
+              metricKey,
+              yMatrix: groupRes.yMatrix,
+              nSignals: groupRes.nSignals,
+              nSamples: groupRes.nSamples,
+              timestamps: groupRes.timestamps,
+              fs: 3e9,
+            },
+            transferables,
+          )
+
+          const m = METRICS[metricKey] || { label: metricKey, unit: '' }
+          const xcol = 'Tiempo (s)'
+          const ycol = `${m.label}${m.unit ? ` (${m.unit})` : ''}`
+
+          const id = nextDatasetId()
+          putDataset({
+            id,
+            name: `${m.label} - ${path.toUpperCase()} (${test})`,
+            columns: [xcol, ycol],
+            rowCount: compRes.nSignals,
+            data: { [xcol]: compRes.times, [ycol]: compRes.values },
+            meta: { test, metricKey, path },
+          })
+
+          addCard({
+            title: `${m.label} vs Tiempo · ${path.toUpperCase()} (${test})`,
+            series: [{ datasetId: id, xCol: xcol, yCol: ycol, name: ycol }],
+            at: pos,
+          })
+          return
+        }
+
+        if (kind === 'humidity' || path === 'humidity') {
+          const res = await hdf5.readHumidity(test)
+          const xcol = 'Tiempo (s)'
+          
+          // Calculate relative seconds from start timestamp
+          const t0 = res.timestamps[0]
+          const x = new Float64Array(res.nSamples)
+          for (let i = 0; i < res.nSamples; i += 1) {
+            x[i] = res.timestamps[i] - t0
+          }
+
+          let yData = res.humidity
+          let ycol = `Humedad (%)`
+          let cardTitle = `Humedad vs Tiempo (${test})`
+
+          if (datasetName === 'temperature') {
+            yData = res.temperature || res.humidity
+            ycol = `Temperatura (°C)`
+            cardTitle = `Temperatura vs Tiempo (${test})`
+          } else if (datasetName === 'timestamps') {
+            yData = res.timestamps
+            ycol = `Timestamp (s)`
+            cardTitle = `Timestamps vs Tiempo (${test})`
+          }
+
+          const id = nextDatasetId()
+          putDataset({
+            id,
+            name: `${ycol} - ${test}`,
+            columns: [xcol, ycol],
+            rowCount: res.nSamples,
+            data: { [xcol]: x, [ycol]: yData },
+            meta: { test, t0 },
+          })
+          addCard({
+            title: cardTitle,
+            series: [{ datasetId: id, xCol: xcol, yCol: ycol, name: ycol }],
+            at: pos,
+          })
+          return
+        }
+
+        const res = await hdf5.readSignal(test, path, row, datasetName)
+        const xcol = 't (muestras)'
+        const ycol = label || `${path} · sig ${row}`
         const x = new Float64Array(res.nSamples)
         for (let i = 0; i < res.nSamples; i += 1) x[i] = i * res.dt
         const id = nextDatasetId()

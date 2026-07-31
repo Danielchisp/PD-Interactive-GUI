@@ -1,6 +1,7 @@
 import { useCallback, useRef, useState } from 'react'
 import { Rnd } from 'react-rnd'
 import { hdf5 } from '../hdf5/hdf5Client.js'
+import { METRICS } from '../compute/metrics.js'
 import { snap } from '../constants.js'
 
 // Source object on the canvas: the open HDF5 becomes a browsable panel.
@@ -61,22 +62,22 @@ export default function DataSourcePanel({ source, geom, onChange, onClose, onFoc
 
 function TestNode({ test }) {
   const [open, setOpen] = useState(false)
-  const [chunks, setChunks] = useState(null)
+  const [children, setChildren] = useState(null)
   const [loading, setLoading] = useState(false)
 
   const toggle = useCallback(async () => {
     const next = !open
     setOpen(next)
-    if (next && !chunks && !loading) {
+    if (next && !children && !loading) {
       setLoading(true)
       try {
-        const res = await hdf5.chunks(test.name)
-        setChunks(res.chunks)
+        const res = await hdf5.testChildren(test.name)
+        setChildren(res.items)
       } finally {
         setLoading(false)
       }
     }
-  }, [open, chunks, loading, test.name])
+  }, [open, children, loading, test.name])
 
   const shortDate = test.date.replace('Test - ', '').replace(/Z$/, '')
 
@@ -87,14 +88,14 @@ function TestNode({ test }) {
         <span className="ds-label" title={test.name}>
           {shortDate}
         </span>
-        <span className="ds-count">{test.nChunks} chunks</span>
+        <span className="ds-count">{test.nChildren} elementos</span>
       </button>
       {open && (
         <div className="ds-children">
-          {loading && <div className="ds-hint">loading chunks…</div>}
-          {chunks &&
-            chunks.map((c) => (
-              <ChunkNode key={c.name} testName={test.name} chunk={c} />
+          {loading && <div className="ds-hint">cargando estructura…</div>}
+          {children &&
+            children.map((item) => (
+              <ChildGroupNode key={item.name} testName={test.name} item={item} />
             ))}
         </div>
       )}
@@ -102,47 +103,93 @@ function TestNode({ test }) {
   )
 }
 
-function ChunkNode({ testName, chunk }) {
+function ChildGroupNode({ testName, item }) {
   const [open, setOpen] = useState(false)
-  const [info, setInfo] = useState(null)
-  const [loading, setLoading] = useState(false)
 
-  const toggle = useCallback(async () => {
-    const next = !open
-    setOpen(next)
-    if (next && !info && !loading) {
-      setLoading(true)
-      try {
-        setInfo(await hdf5.chunkInfo(testName, chunk.name))
-      } finally {
-        setLoading(false)
-      }
-    }
-  }, [open, info, loading, testName, chunk.name])
+  const toggle = useCallback(() => {
+    setOpen((prev) => !prev)
+  }, [])
 
-  const label = chunk.name.replace('chunk_', '#')
+  // Si tiene nSignals > 0 (ej. ae con 12103 o uhf con 89 señales), mostramos lista de señales
+  const isSignalMatrix = item.nSignals > 0
+  const isHumidityGroup = item.name === 'humidity'
+  const groupLabel = isHumidityGroup ? 'ambiental' : item.name
+
+  const draggableProps = {
+    draggable: true,
+    onDragStart: (e) => {
+      e.dataTransfer.effectAllowed = 'copy'
+      e.dataTransfer.setData(
+        'application/x-hdf5-signal',
+        JSON.stringify({
+          kind: isHumidityGroup ? 'humidity' : 'groupSeries',
+          test: testName,
+          path: item.name,
+          datasetName: 'data',
+          label: `${groupLabel.toUpperCase()} (${testName})`,
+        }),
+      )
+    },
+  }
 
   return (
     <div className="ds-node">
-      <button className="ds-row ds-chunk" onClick={toggle}>
-        <Caret open={open} />
-        <span className="ds-label">{label}</span>
-        {info && (
-          <span className={`ds-count ${info.isBaseline ? 'is-base' : ''}`}>
-            {info.nSignals} sig{info.isBaseline ? ' · base' : ''}
+      <div
+        className="ds-row ds-chunk"
+        style={{ cursor: 'grab', display: 'flex', alignItems: 'center' }}
+        {...draggableProps}
+      >
+        <button
+          onClick={(e) => {
+            e.stopPropagation()
+            toggle()
+          }}
+          style={{
+            background: 'none',
+            border: 'none',
+            color: 'inherit',
+            display: 'flex',
+            alignItems: 'center',
+            cursor: 'pointer',
+            padding: 0,
+            flex: 1,
+            textAlign: 'left',
+          }}
+        >
+          <Caret open={open} />
+          <span className="ds-label" style={{ fontWeight: 'bold' }}>
+            {groupLabel}
           </span>
-        )}
-      </button>
+          {isSignalMatrix ? (
+            <span className="ds-count">
+              {item.nSignals} señales ({item.nSamples} pts)
+            </span>
+          ) : item.datasets.length > 0 ? (
+            <span className="ds-count">{item.datasets.length} vars</span>
+          ) : null}
+        </button>
+      </div>
+
+
+
       {open && (
         <div className="ds-children">
-          {loading && <div className="ds-hint">reading…</div>}
-          {info && (
+          {isSignalMatrix ? (
             <SignalList
               testName={testName}
-              chunkName={chunk.name}
-              count={info.nSignals}
-              offset={info.signalOffset}
+              path={item.name}
+              count={item.nSignals}
+              nSamples={item.nSamples}
             />
+          ) : (
+            item.datasets.map((dsName) => (
+              <DatasetItemNode
+                key={dsName}
+                testName={testName}
+                path={item.name}
+                datasetName={dsName}
+              />
+            ))
           )}
         </div>
       )}
@@ -150,11 +197,44 @@ function ChunkNode({ testName, chunk }) {
   )
 }
 
-// Virtualized list: only renders visible rows. Handles thousands of signals
-// with no DOM cost.
-function SignalList({ testName, chunkName, count, offset }) {
+function DatasetItemNode({ testName, path, datasetName }) {
+  const isHumidityGroup = path === 'humidity'
+  const displayGroupName = isHumidityGroup ? 'ambiental' : path
+  const label = isHumidityGroup
+    ? `${datasetName} (${testName})`
+    : `${path} / ${datasetName}`
+
+  return (
+    <div
+      className="ds-signal"
+      style={{ paddingLeft: '24px' }}
+      draggable
+      onDragStart={(e) => {
+        e.dataTransfer.effectAllowed = 'copy'
+        e.dataTransfer.setData(
+          'application/x-hdf5-signal',
+          JSON.stringify({
+            kind: isHumidityGroup ? 'humidity' : 'signal',
+            test: testName,
+            path,
+            datasetName,
+            row: 0,
+            label,
+          }),
+        )
+      }}
+    >
+      <span className="ds-sig-dot" />
+      {datasetName}
+      {isHumidityGroup && <span className="ds-sig-row"> (serie temporal)</span>}
+    </div>
+  )
+}
+
+// Lista virtualizada para renderizar eficientemente miles de señales (ej. 12,103 señales AE)
+function SignalList({ testName, path, count, nSamples }) {
   const [scrollTop, setScrollTop] = useState(0)
-  const viewH = Math.min(count * ROW_H, 200)
+  const viewH = Math.min(count * ROW_H, 220)
   const total = count * ROW_H
   const first = Math.max(0, Math.floor(scrollTop / ROW_H) - 4)
   const visible = Math.ceil(viewH / ROW_H) + 8
@@ -162,7 +242,7 @@ function SignalList({ testName, chunkName, count, offset }) {
 
   const rows = []
   for (let i = first; i < last; i += 1) {
-    const globalIndex = offset + i
+    const label = `${path.toUpperCase()} · Medida #${i + 1} (${nSamples} pts)`
     rows.push(
       <div
         key={i}
@@ -175,16 +255,17 @@ function SignalList({ testName, chunkName, count, offset }) {
             'application/x-hdf5-signal',
             JSON.stringify({
               test: testName,
-              chunk: chunkName,
+              path,
+              datasetName: 'data',
               row: i,
-              label: `${chunkName.replace('chunk_', '#')} · sig ${globalIndex}`,
+              label,
             }),
           )
         }}
       >
         <span className="ds-sig-dot" />
-        sig {globalIndex}
-        <span className="ds-sig-row">row {i}</span>
+        {path} #${i + 1}
+        <span className="ds-sig-row">índice {i}</span>
       </div>,
     )
   }
