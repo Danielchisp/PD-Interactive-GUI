@@ -105,7 +105,6 @@ function TestNode({ test }) {
 
 function ChildGroupNode({ testName, item }) {
   const [open, setOpen] = useState(false)
-  const [selectedMetric, setSelectedMetric] = useState('vmax')
 
   const toggle = useCallback(() => {
     setOpen((prev) => !prev)
@@ -115,35 +114,35 @@ function ChildGroupNode({ testName, item }) {
   const isSignalMatrix = item.nSignals > 0
   const isHumidityGroup = item.name === 'humidity'
 
-  const draggableProps = isHumidityGroup
-    ? {
-        draggable: true,
-        onDragStart: (e) => {
-          e.dataTransfer.effectAllowed = 'copy'
-          e.dataTransfer.setData(
-            'application/x-hdf5-signal',
-            JSON.stringify({
-              kind: 'humidity',
-              test: testName,
-              path: item.name,
-              datasetName: 'humidity',
-              row: 0,
-              label: `Humedad (${testName})`,
-            }),
-          )
-        },
-      }
-    : {}
+  const draggableProps = {
+    draggable: true,
+    onDragStart: (e) => {
+      e.dataTransfer.effectAllowed = 'copy'
+      e.dataTransfer.setData(
+        'application/x-hdf5-signal',
+        JSON.stringify({
+          kind: isHumidityGroup ? 'humidity' : 'groupSeries',
+          test: testName,
+          path: item.name,
+          datasetName: 'data',
+          label: `${item.name.toUpperCase()} (${testName})`,
+        }),
+      )
+    },
+  }
 
   return (
     <div className="ds-node">
       <div
         className="ds-row ds-chunk"
-        style={{ cursor: isHumidityGroup ? 'grab' : 'pointer', display: 'flex', alignItems: 'center' }}
+        style={{ cursor: 'grab', display: 'flex', alignItems: 'center' }}
         {...draggableProps}
       >
         <button
-          onClick={toggle}
+          onClick={(e) => {
+            e.stopPropagation()
+            toggle()
+          }}
           style={{
             background: 'none',
             border: 'none',
@@ -170,71 +169,7 @@ function ChildGroupNode({ testName, item }) {
         </button>
       </div>
 
-      {isSignalMatrix && (
-        <div
-          style={{
-            paddingLeft: '22px',
-            paddingRight: '10px',
-            marginTop: '4px',
-            marginBottom: '4px',
-            display: 'flex',
-            alignItems: 'center',
-            gap: '6px',
-          }}
-        >
-          <select
-            value={selectedMetric}
-            onChange={(e) => setSelectedMetric(e.target.value)}
-            style={{
-              flex: 1,
-              background: 'var(--panel-2)',
-              color: 'var(--text)',
-              border: '1px solid var(--line)',
-              borderRadius: '4px',
-              fontSize: '11px',
-              padding: '2px 4px',
-              cursor: 'pointer',
-            }}
-          >
-            {Object.entries(METRICS).map(([k, m]) => (
-              <option key={k} value={k}>
-                {m.label} {m.unit ? `(${m.unit})` : ''}
-              </option>
-            ))}
-          </select>
-          <div
-            className="ds-signal"
-            style={{
-              position: 'relative',
-              height: 'auto',
-              padding: '2px 8px',
-              borderRadius: '4px',
-              background: 'var(--accent)',
-              color: '#06121f',
-              fontWeight: 600,
-              fontSize: '10px',
-              cursor: 'grab',
-            }}
-            draggable
-            onDragStart={(e) => {
-              const m = METRICS[selectedMetric]
-              e.dataTransfer.effectAllowed = 'copy'
-              e.dataTransfer.setData(
-                'application/x-hdf5-signal',
-                JSON.stringify({
-                  kind: 'groupMetric',
-                  test: testName,
-                  path: item.name,
-                  metricKey: selectedMetric,
-                  label: `${m.label} · ${item.name.toUpperCase()} (${testName})`,
-                }),
-              )
-            }}
-          >
-            + Graficar Métrica
-          </div>
-        </div>
-      )}
+
 
       {open && (
         <div className="ds-children">

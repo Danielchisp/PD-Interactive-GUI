@@ -315,11 +315,42 @@ export default function App() {
 
   const closeSource = useCallback(() => setSource(null), [])
 
-  // Drop a signal or humidity dataset on the canvas => read data and plot it.
+  // Drop a signal, humidity dataset or full group series on the canvas => read data and plot it.
   const onDropSignal = useCallback(
     async (payload, pos) => {
       try {
         const { kind, test, path, row = 0, datasetName = 'data', metricKey, label } = payload
+
+        if (kind === 'groupSeries') {
+          // Read full matrix (e.g. ae or uhf) and downsample each signal to 4 points (min, max, etc.)
+          const groupRes = await hdf5.readGroupMatrix(test, path)
+          const compRes = await compute.groupSeries({
+            yMatrix: groupRes.yMatrix,
+            nSignals: groupRes.nSignals,
+            nSamples: groupRes.nSamples,
+            timestamps: groupRes.timestamps,
+          })
+
+          const xcol = 'Tiempo (s)'
+          const ycol = `Amplitud (${path.toUpperCase()})`
+
+          const id = nextDatasetId()
+          putDataset({
+            id,
+            name: `${path.toUpperCase()} continuo - ${test}`,
+            columns: [xcol, ycol],
+            rowCount: compRes.totalPts,
+            data: { [xcol]: compRes.xData, [ycol]: compRes.yData },
+            meta: { test, path, nSignals: compRes.nSignals },
+          })
+
+          addCard({
+            title: `Serie ${path.toUpperCase()} (${compRes.nSignals} señales) · ${test}`,
+            series: [{ datasetId: id, xCol: xcol, yCol: ycol, name: ycol }],
+            at: pos,
+          })
+          return
+        }
 
         if (kind === 'groupMetric') {
           // Read full group matrix and compute chosen metric across all signals in background worker

@@ -35,5 +35,6 @@ function call(type, payload) {
 export const compute = {
   // inputs: [{ name, y, dt }] -> { results: [{ name, freq, mag }] }
   fft: (inputs, opts = {}) => call('fft', { inputs, opts }),
+  groupSeries: (payload) => call('groupSeries', payload),
   metricGroup: (payload) => call('metricGroup', payload),
 }
