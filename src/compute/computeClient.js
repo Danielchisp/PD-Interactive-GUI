@@ -23,18 +23,18 @@ function ensureWorker() {
   return worker
 }
 
-function call(type, payload) {
+function call(type, payload, transfer = []) {
   const w = ensureWorker()
   const id = ++seq
   return new Promise((resolve, reject) => {
     pending.set(id, { resolve, reject })
-    w.postMessage({ id, type, payload })
+    w.postMessage({ id, type, payload }, transfer)
   })
 }
 
 export const compute = {
   // inputs: [{ name, y, dt }] -> { results: [{ name, freq, mag }] }
   fft: (inputs, opts = {}) => call('fft', { inputs, opts }),
-  groupSeries: (payload) => call('groupSeries', payload),
-  metricGroup: (payload) => call('metricGroup', payload),
+  groupSeries: (payload, transfer = []) => call('groupSeries', payload, transfer),
+  metricGroup: (payload, transfer = []) => call('metricGroup', payload, transfer),
 }

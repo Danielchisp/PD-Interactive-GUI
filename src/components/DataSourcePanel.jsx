@@ -113,6 +113,7 @@ function ChildGroupNode({ testName, item }) {
   // Si tiene nSignals > 0 (ej. ae con 12103 o uhf con 89 señales), mostramos lista de señales
   const isSignalMatrix = item.nSignals > 0
   const isHumidityGroup = item.name === 'humidity'
+  const groupLabel = isHumidityGroup ? 'ambiental' : item.name
 
   const draggableProps = {
     draggable: true,
@@ -125,7 +126,7 @@ function ChildGroupNode({ testName, item }) {
           test: testName,
           path: item.name,
           datasetName: 'data',
-          label: `${item.name.toUpperCase()} (${testName})`,
+          label: `${groupLabel.toUpperCase()} (${testName})`,
         }),
       )
     },
@@ -157,7 +158,7 @@ function ChildGroupNode({ testName, item }) {
         >
           <Caret open={open} />
           <span className="ds-label" style={{ fontWeight: 'bold' }}>
-            {item.name}
+            {groupLabel}
           </span>
           {isSignalMatrix ? (
             <span className="ds-count">
@@ -198,8 +199,9 @@ function ChildGroupNode({ testName, item }) {
 
 function DatasetItemNode({ testName, path, datasetName }) {
   const isHumidityGroup = path === 'humidity'
+  const displayGroupName = isHumidityGroup ? 'ambiental' : path
   const label = isHumidityGroup
-    ? `Humedad (${testName})`
+    ? `${datasetName} (${testName})`
     : `${path} / ${datasetName}`
 
   return (

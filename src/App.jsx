@@ -322,14 +322,8 @@ export default function App() {
         const { kind, test, path, row = 0, datasetName = 'data', metricKey, label } = payload
 
         if (kind === 'groupSeries') {
-          // Read full matrix (e.g. ae or uhf) and downsample each signal to 4 points (min, max, etc.)
-          const groupRes = await hdf5.readGroupMatrix(test, path)
-          const compRes = await compute.groupSeries({
-            yMatrix: groupRes.yMatrix,
-            nSignals: groupRes.nSignals,
-            nSamples: groupRes.nSamples,
-            timestamps: groupRes.timestamps,
-          })
+          // Read group and downsample each signal to 4 points (min, max, etc.) directly in hdf5 worker
+          const summaryRes = await hdf5.readGroupSummary(test, path)
 
           const xcol = 'Tiempo (s)'
           const ycol = `Amplitud (${path.toUpperCase()})`
@@ -339,13 +333,13 @@ export default function App() {
             id,
             name: `${path.toUpperCase()} continuo - ${test}`,
             columns: [xcol, ycol],
-            rowCount: compRes.totalPts,
-            data: { [xcol]: compRes.xData, [ycol]: compRes.yData },
-            meta: { test, path, nSignals: compRes.nSignals },
+            rowCount: summaryRes.totalPts,
+            data: { [xcol]: summaryRes.xData, [ycol]: summaryRes.yData },
+            meta: { test, path, nSignals: summaryRes.nSignals },
           })
 
           addCard({
-            title: `Serie ${path.toUpperCase()} (${compRes.nSignals} señales) · ${test}`,
+            title: `Serie ${path.toUpperCase()} (${summaryRes.nSignals} señales) · ${test}`,
             series: [{ datasetId: id, xCol: xcol, yCol: ycol, name: ycol }],
             at: pos,
           })
@@ -355,14 +349,20 @@ export default function App() {
         if (kind === 'groupMetric') {
           // Read full group matrix and compute chosen metric across all signals in background worker
           const groupRes = await hdf5.readGroupMatrix(test, path)
-          const compRes = await compute.metricGroup({
-            metricKey,
-            yMatrix: groupRes.yMatrix,
-            nSignals: groupRes.nSignals,
-            nSamples: groupRes.nSamples,
-            timestamps: groupRes.timestamps,
-            fs: 3e9,
-          })
+          const transferables = [groupRes.yMatrix.buffer]
+          if (groupRes.timestamps) transferables.push(groupRes.timestamps.buffer)
+
+          const compRes = await compute.metricGroup(
+            {
+              metricKey,
+              yMatrix: groupRes.yMatrix,
+              nSignals: groupRes.nSignals,
+              nSamples: groupRes.nSamples,
+              timestamps: groupRes.timestamps,
+              fs: 3e9,
+            },
+            transferables,
+          )
 
           const m = METRICS[metricKey] || { label: metricKey, unit: '' }
           const xcol = 'Tiempo (s)'

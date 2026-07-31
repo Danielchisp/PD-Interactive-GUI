@@ -198,7 +198,7 @@ function readSignalData(testName, path, row = 0, datasetName = 'data') {
   }
 }
 
-function readGroupMatrix(testName, path) {
+function readGroupSummary(testName, path) {
   const fullPath = `${testName}/${path}/data`
   const timePath = `${testName}/${path}/timestamps`
   const dset = h5file.get(fullPath)
@@ -209,25 +209,64 @@ function readGroupMatrix(testName, path) {
   }
 
   const [nSignals, nSamples] = dset.shape
-  const rawData = dset.value // Uint8Array or Float32Array or Float64Array
-  const yMatrix = Float32Array.from(rawData)
-  
+
   let timestamps = null
   if (tDset) {
     timestamps = Float64Array.from(tDset.value)
   }
+  const hasTimestamps = timestamps && timestamps.length === nSignals
+  const t0 = hasTimestamps ? timestamps[0] : 0
 
-  const transfer = [yMatrix.buffer]
-  if (timestamps) transfer.push(timestamps.buffer)
+  const totalPts = nSignals * 4
+  const xData = new Float64Array(totalPts)
+  const yData = new Float64Array(totalPts)
+
+  // Procesar fila a fila directamente de la memoria HDF5 (Lazy VFS) para no reservar 2 GB de RAM
+  for (let i = 0; i < nSignals; i++) {
+    const slab = dset.slice([[i, i + 1], [0, nSamples]])
+    const row = Float32Array.from(slab)
+
+    let minVal = Infinity
+    let maxVal = -Infinity
+    let minIdx = 0
+    let maxIdx = 0
+
+    for (let j = 0; j < nSamples; j++) {
+      const val = row[j]
+      if (val < minVal) {
+        minVal = val
+        minIdx = j
+      }
+      if (val > maxVal) {
+        maxVal = val
+        maxIdx = j
+      }
+    }
+
+    const tBase = hasTimestamps ? (timestamps[i] - t0) : i
+    const baseIdx = i * 4
+
+    xData[baseIdx] = tBase
+    yData[baseIdx] = row[0]
+
+    xData[baseIdx + 1] = tBase + (minIdx / nSamples) * 0.001
+    yData[baseIdx + 1] = minVal
+
+    xData[baseIdx + 2] = tBase + (maxIdx / nSamples) * 0.001
+    yData[baseIdx + 2] = maxVal
+
+    xData[baseIdx + 3] = tBase + 0.001
+    yData[baseIdx + 3] = row[nSamples - 1]
+  }
 
   return {
     testName,
     path,
     nSignals,
-    nSamples,
-    yMatrix,
-    timestamps,
-    transfer,
+    totalPts,
+    xData,
+    yData,
+    transfer: [xData.buffer, yData.buffer],
   }
 }
 
@@ -269,7 +308,8 @@ const handlers = {
   chunks: (p) => listTestChildren(p.test), // retrocompatibilidad
   readSignal: (p) => readSignalData(p.test, p.path, p.row, p.datasetName),
   readHumidity: (p) => readHumidityData(p.test),
-  readGroupMatrix: (p) => readGroupMatrix(p.test, p.path),
+  readGroupSummary: (p) => readGroupSummary(p.test, p.path),
+  readGroupMatrix: (p) => readGroupSummary(p.test, p.path),
   signal: (p) => readSignalData(p.test, `${p.chunk}/signals`, p.row, 'data'), // retrocompatibilidad
 }
 
