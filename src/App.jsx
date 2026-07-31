@@ -6,6 +6,7 @@ import DataSourcePanel from './components/DataSourcePanel.jsx'
 import ThemeToggle from './components/ThemeToggle.jsx'
 import { hdf5 } from './hdf5/hdf5Client.js'
 import { compute } from './compute/computeClient.js'
+import { METRICS } from './compute/metrics.js'
 import { opsFor } from './compute/operations.js'
 import {
   deleteDataset,
@@ -318,7 +319,41 @@ export default function App() {
   const onDropSignal = useCallback(
     async (payload, pos) => {
       try {
-        const { kind, test, path, row = 0, datasetName = 'data', label } = payload
+        const { kind, test, path, row = 0, datasetName = 'data', metricKey, label } = payload
+
+        if (kind === 'groupMetric') {
+          // Read full group matrix and compute chosen metric across all signals in background worker
+          const groupRes = await hdf5.readGroupMatrix(test, path)
+          const compRes = await compute.metricGroup({
+            metricKey,
+            yMatrix: groupRes.yMatrix,
+            nSignals: groupRes.nSignals,
+            nSamples: groupRes.nSamples,
+            timestamps: groupRes.timestamps,
+            fs: 3e9,
+          })
+
+          const m = METRICS[metricKey] || { label: metricKey, unit: '' }
+          const xcol = 'Tiempo (s)'
+          const ycol = `${m.label}${m.unit ? ` (${m.unit})` : ''}`
+
+          const id = nextDatasetId()
+          putDataset({
+            id,
+            name: `${m.label} - ${path.toUpperCase()} (${test})`,
+            columns: [xcol, ycol],
+            rowCount: compRes.nSignals,
+            data: { [xcol]: compRes.times, [ycol]: compRes.values },
+            meta: { test, metricKey, path },
+          })
+
+          addCard({
+            title: `${m.label} vs Tiempo · ${path.toUpperCase()} (${test})`,
+            series: [{ datasetId: id, xCol: xcol, yCol: ycol, name: ycol }],
+            at: pos,
+          })
+          return
+        }
 
         if (kind === 'humidity' || path === 'humidity') {
           const res = await hdf5.readHumidity(test)

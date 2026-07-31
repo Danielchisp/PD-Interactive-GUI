@@ -4,6 +4,7 @@
 // many series (one spectrum per series).
 
 import { welchSpectrum } from './welch.js'
+import { computeMetricForSignal } from './metrics.js'
 
 const handlers = {
   // inputs: [{ name, y, dt }] -> [{ name, freq, mag }]
@@ -17,6 +18,31 @@ const handlers = {
       transfer.push(freq.buffer, mag.buffer)
     }
     return { result: { results }, transfer }
+  },
+
+  // Compute metric across full group matrix
+  metricGroup: ({ metricKey, yMatrix, nSignals, nSamples, timestamps, fs }) => {
+    const values = new Float64Array(nSignals)
+    const times = new Float64Array(nSignals)
+
+    const t0 = (timestamps && timestamps.length > 0) ? timestamps[0] : 0
+
+    for (let i = 0; i < nSignals; i++) {
+      const offset = i * nSamples
+      const sig = yMatrix.subarray(offset, offset + nSamples)
+      values[i] = computeMetricForSignal(metricKey, sig, timestamps, i, nSignals, fs)
+
+      if (timestamps && i < timestamps.length) {
+        times[i] = timestamps[i] - t0
+      } else {
+        times[i] = i
+      }
+    }
+
+    return {
+      result: { values, times, nSignals },
+      transfer: [values.buffer, times.buffer],
+    }
   },
 }
 

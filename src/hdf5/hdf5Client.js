@@ -40,5 +40,6 @@ export const hdf5 = {
   chunks: (test) => call('chunks', { test }),
   readSignal: (test, path, row, datasetName) => call('readSignal', { test, path, row, datasetName }),
   readHumidity: (test) => call('readHumidity', { test }),
+  readGroupMatrix: (test, path) => call('readGroupMatrix', { test, path }),
   signal: (test, chunk, row) => call('signal', { test, chunk, row }),
 }

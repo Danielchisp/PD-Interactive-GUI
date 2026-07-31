@@ -198,6 +198,39 @@ function readSignalData(testName, path, row = 0, datasetName = 'data') {
   }
 }
 
+function readGroupMatrix(testName, path) {
+  const fullPath = `${testName}/${path}/data`
+  const timePath = `${testName}/${path}/timestamps`
+  const dset = h5file.get(fullPath)
+  const tDset = h5file.get(timePath)
+
+  if (!dset) {
+    throw new Error(`Dataset 'data' no encontrado en ${testName}/${path}`)
+  }
+
+  const [nSignals, nSamples] = dset.shape
+  const rawData = dset.value // Uint8Array or Float32Array or Float64Array
+  const yMatrix = Float32Array.from(rawData)
+  
+  let timestamps = null
+  if (tDset) {
+    timestamps = Float64Array.from(tDset.value)
+  }
+
+  const transfer = [yMatrix.buffer]
+  if (timestamps) transfer.push(timestamps.buffer)
+
+  return {
+    testName,
+    path,
+    nSignals,
+    nSamples,
+    yMatrix,
+    timestamps,
+    transfer,
+  }
+}
+
 function readHumidityData(testName) {
   const g = h5file.get(`${testName}/humidity`)
   if (!g) {
@@ -236,6 +269,7 @@ const handlers = {
   chunks: (p) => listTestChildren(p.test), // retrocompatibilidad
   readSignal: (p) => readSignalData(p.test, p.path, p.row, p.datasetName),
   readHumidity: (p) => readHumidityData(p.test),
+  readGroupMatrix: (p) => readGroupMatrix(p.test, p.path),
   signal: (p) => readSignalData(p.test, `${p.chunk}/signals`, p.row, 'data'), // retrocompatibilidad
 }
 
