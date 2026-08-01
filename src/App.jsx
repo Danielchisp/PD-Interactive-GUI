@@ -3,8 +3,16 @@ import Canvas from './components/Canvas.jsx'
 import Menu from './components/Menu.jsx'
 import ChartCard from './components/ChartCard.jsx'
 import DataSourcePanel from './components/DataSourcePanel.jsx'
+import MetricsProgress from './components/MetricsProgress.jsx'
 import ThemeToggle from './components/ThemeToggle.jsx'
 import { hdf5 } from './hdf5/hdf5Client.js'
+import {
+  downloadSidecar,
+  fetchSidecar,
+  loadSidecar,
+  saveSidecar,
+  sidecarKey,
+} from './hdf5/metricsStore.js'
 import { compute } from './compute/computeClient.js'
 import { METRICS } from './compute/metrics.js'
 import { opsFor } from './compute/operations.js'
@@ -46,6 +54,8 @@ export default function App() {
   const [error, setError] = useState(null)
   const [theme, setTheme] = useState('dark')
   const [mergeTargetId, setMergeTargetId] = useState(null) // highlighted while dragging
+  const [metricsProgress, setMetricsProgress] = useState(null) // { done, total, ... }
+  const [metrics, setMetrics] = useState(null) // { key, bytes, index, fileName }
 
   const hdfInputRef = useRef(null)
   const spawnAtRef = useRef(null) // remembered click point for the panel
@@ -296,12 +306,71 @@ export default function App() {
         tests: res.tests,
         geom: { x: snap(at.x), y: snap(at.y), ...PANEL_DEFAULT, z: bumpZ() },
       })
+      setOpening(false)
+      await ensureMetricsRef.current(file)
     } catch (err) {
       setError(err?.message || 'Could not open the HDF5 file.')
     } finally {
       setOpening(false)
     }
   }, [])
+
+  // Al abrir un archivo, las 12 métricas escalares por señal deben existir.
+  // Se recuperan del sidecar cacheado y sólo se calcula lo que falte; sobre
+  // cientos de miles de señales el cálculo son minutos, de ahí la barra.
+  const ensureMetrics = useCallback(async (file) => {
+    const key = sidecarKey(file)
+    // Preferencia: el sidecar que dejó scripts/compute_metrics.py junto al
+    // master (lo sirve el dev server). Si no está, el caché del navegador.
+    let bytes = await fetchSidecar(file.name)
+    const fromDisk = bytes !== null
+    if (!bytes) bytes = await loadSidecar(key)
+
+    try {
+      const plan = await hdf5.metricsPlan(bytes)
+
+      if (plan.skipped.length > 0) {
+        setError(
+          `Sin métricas en ${plan.skipped.length} grupo(s): falta el atributo fs_<sensor> ` +
+          `en el experimento (${plan.skipped.map((s) => `${s.test}/${s.sensor}`).join(', ')}).`,
+        )
+      }
+
+      // Ya estaba todo calculado (por el CLI o en una sesión anterior).
+      if (plan.pending.length === 0) {
+        if (bytes) {
+          setMetrics({ key, bytes, index: plan.index, fileName: file.name, fromDisk })
+          // Si vino del disco no se duplica en IndexedDB: el archivo manda.
+          if (!fromDisk) await saveSidecar(key, bytes)
+        }
+        return
+      }
+
+      setMetricsProgress({
+        done: 0,
+        total: plan.totalSignals,
+        phase: 'start',
+        startedAt: performance.now(),
+      })
+
+      const run = await hdf5.metricsRun(bytes, (p) =>
+        setMetricsProgress((prev) => (prev ? { ...prev, ...p } : prev)),
+      )
+
+      bytes = run.bytes
+      await saveSidecar(key, bytes)
+      setMetrics({ key, bytes, index: run.index, fileName: file.name })
+    } catch (err) {
+      setError(`Métricas: ${err?.message || err}`)
+    } finally {
+      setMetricsProgress(null)
+    }
+  }, [])
+
+  // onHdfFile se declara antes que ensureMetrics, así que lo alcanza por ref
+  // en vez de por dependencia (evita el TDZ al evaluar el array en el render).
+  const ensureMetricsRef = useRef(ensureMetrics)
+  ensureMetricsRef.current = ensureMetrics
 
   const updateSourceGeom = useCallback((patch) => {
     setSource((s) => (s ? { ...s, geom: { ...s.geom, ...patch } } : s))
@@ -520,6 +589,18 @@ export default function App() {
       )}
 
       {opening && <div className="hint">opening HDF5…</div>}
+
+      <MetricsProgress state={metricsProgress} />
+
+      {metrics && !metricsProgress && (
+        <button
+          className="metrics-export"
+          onClick={() => downloadSidecar(metrics.bytes, metrics.fileName)}
+          title="Guardar las métricas como archivo .h5 junto al master"
+        >
+          ⭳ métricas .h5
+        </button>
+      )}
 
       {error && (
         <div className="toast-error" onClick={() => setError(null)}>

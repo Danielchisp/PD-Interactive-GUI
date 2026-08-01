@@ -15,3 +15,12 @@ npm-debug.log*
 .DS_Store
 .vscode/
 .idea/
+
+# Data (masters, respaldos y sidecars de métricas)
+*.hdf5
+*.h5
+*.hdf5.bak
+
+# Python
+__pycache__/
+*.pyc

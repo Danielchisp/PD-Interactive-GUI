@@ -6,10 +6,12 @@
 // few MB are read out of 1 GB.
 
 import h5wasm from 'h5wasm'
+import { createMetricsEngine } from '../compute/metricsEngine.js'
 
 let FS = null
 let h5file = null // open h5wasm.File instance
 const MOUNT = '/lazy/data.h5'
+const SIDECAR = '/out/metrics.h5'
 
 async function ensureReady() {
   if (FS) return
@@ -301,6 +303,16 @@ function readHumidityData(testName) {
   }
 }
 
+// --- Métricas ---------------------------------------------------------------
+// La lógica vive en compute/metricsEngine.js para poder ejercitarla fuera del
+// worker; aquí sólo se le inyectan h5wasm y el FS de esta instancia.
+
+let engine = null
+function metricsEngine() {
+  if (!engine) engine = createMetricsEngine({ h5wasm, FS, sidecarPath: SIDECAR })
+  return engine
+}
+
 // --- Message bridge ---------------------------------------------------------
 const handlers = {
   open: (p) => openFile(p.file),
@@ -311,13 +323,25 @@ const handlers = {
   readGroupSummary: (p) => readGroupSummary(p.test, p.path),
   readGroupMatrix: (p) => readGroupSummary(p.test, p.path),
   signal: (p) => readSignalData(p.test, `${p.chunk}/signals`, p.row, 'data'), // retrocompatibilidad
+  metricsPlan: (p) => metricsEngine().plan(h5file, p.sidecarBytes),
+  metricsRun: (p, emit) => {
+    const r = metricsEngine().run(h5file, p.sidecarBytes, emit)
+    return { ...r, transfer: [r.bytes.buffer] }
+  },
+  readMetric: (p) => {
+    const r = metricsEngine().readMetric(p)
+    return { ...r, transfer: [r.values.buffer] }
+  },
 }
 
 self.onmessage = async (e) => {
   const { id, type, payload } = e.data
   try {
     await ensureReady()
-    const result = await handlers[type](payload)
+    // Los handlers largos reportan avance con este emisor; el cliente lo
+    // distingue de la respuesta final por el campo `progress`.
+    const emit = (progress) => self.postMessage({ id, progress })
+    const result = await handlers[type](payload, emit)
     const transfer = result && result.transfer ? result.transfer : []
     if (result) delete result.transfer
     self.postMessage({ id, ok: true, result }, transfer)
