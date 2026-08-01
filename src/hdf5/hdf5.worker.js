@@ -121,19 +121,35 @@ function openFile(file) {
   return { fileName: file.name, tests }
 }
 
+// Span temporal de un grupo, en segundos. Sólo se leen el primer y el último
+// timestamp (dos slices), nunca el vector completo: en AE son >36k valores.
+function groupDuration(path) {
+  const t = h5file.get(`${path}/timestamps`)
+  if (!t || !t.shape || t.shape.length !== 1 || t.shape[0] < 2) return null
+  const n = t.shape[0]
+  const first = Number(t.slice([[0, 1]])[0])
+  const last = Number(t.slice([[n - 1, n]])[0])
+  const span = last - first
+  return Number.isFinite(span) && span >= 0 ? span : null
+}
+
 function listTestChildren(testName) {
   const g = h5file.get(testName)
   const keys = g.keys()
-  
+
   const items = keys.map((key) => {
     const item = h5file.get(`${testName}/${key}`)
     const isGroup = item instanceof h5wasm.Group
     let datasets = []
     let nSignals = 0
     let nSamples = 0
+    let durationS = null
 
     if (isGroup) {
       const subKeys = item.keys()
+      if (subKeys.includes('timestamps')) {
+        durationS = groupDuration(`${testName}/${key}`)
+      }
       // Si contiene 'data', es un dataset de señales (ej. ae/data, uhf/data o chunk_XX/signals/data)
       if (subKeys.includes('data')) {
         const dset = h5file.get(`${testName}/${key}/data`)
@@ -162,6 +178,7 @@ function listTestChildren(testName) {
       datasets,
       nSignals,
       nSamples,
+      durationS,
       attrs: item.attrs ? Object.fromEntries(Object.entries(item.attrs).map(([k, v]) => [k, v.value])) : {},
     }
   })
@@ -198,6 +215,42 @@ function readSignalData(testName, path, row = 0, datasetName = 'data') {
     row,
     transfer: [y.buffer],
   }
+}
+
+// Timestamps de un grupo en float64. NO se puede usar readSignalData para
+// esto: devuelve Float32Array, y un epoch como 1784038547 en float32 pierde
+// unos 100 s de precisión, suficiente para descuadrar el eje de tiempo.
+function readTimestamps(testName, path) {
+  const dset = h5file.get(`${testName}/${path}/timestamps`)
+  if (!dset || !dset.shape || dset.shape.length !== 1) {
+    throw new Error(`Sin timestamps en ${testName}/${path}`)
+  }
+  const values = Float64Array.from(dset.value)
+  return { values, n: values.length, transfer: [values.buffer] }
+}
+
+// Instante inicial común del experimento: el mínimo de los primeros
+// timestamps de todos sus grupos. Es el origen que hace que los gráficos
+// alineados representen de verdad los mismos instantes.
+function experimentT0(testName) {
+  const g = h5file.get(testName)
+  if (!g) throw new Error(`Test no encontrado: ${testName}`)
+  let t0 = Infinity
+  const spans = {}
+  for (const key of g.keys()) {
+    const child = h5file.get(`${testName}/${key}`)
+    if (!(child instanceof h5wasm.Group) || !child.keys().includes('timestamps')) continue
+    const t = h5file.get(`${testName}/${key}/timestamps`)
+    if (!t || !t.shape || t.shape.length !== 1 || t.shape[0] < 1) continue
+    const n = t.shape[0]
+    const first = Number(t.slice([[0, 1]])[0])
+    const last = Number(t.slice([[n - 1, n]])[0])
+    spans[key] = { first, last, n }
+    if (first < t0) t0 = first
+  }
+  if (!Number.isFinite(t0)) throw new Error(`Sin timestamps en ${testName}`)
+  const tEnd = Math.max(...Object.values(spans).map((s) => s.last))
+  return { t0, tEnd, durationS: tEnd - t0, spans }
 }
 
 function readGroupSummary(testName, path) {
@@ -328,6 +381,8 @@ const handlers = {
     const r = metricsEngine().run(h5file, p.sidecarBytes, emit)
     return { ...r, transfer: [r.bytes.buffer] }
   },
+  readTimestamps: (p) => readTimestamps(p.test, p.path),
+  experimentT0: (p) => experimentT0(p.test),
   readMetric: (p) => {
     const r = metricsEngine().readMetric(p)
     return { ...r, transfer: [r.values.buffer] }

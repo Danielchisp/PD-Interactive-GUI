@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react'
 import { Rnd } from 'react-rnd'
 import Plotly from 'plotly.js-dist-min'
 import { getDataset } from '../state/datasetStore.js'
+import { publishAxis, subscribeAxis } from '../state/axisSync.js'
 import { snap } from '../constants.js'
 
 // Chart card: draggable + resizable (react-rnd), with a title bar. Data is read
@@ -28,18 +29,34 @@ const THEME = {
 const CONFIG = { displaylogo: false, responsive: false, scrollZoom: true }
 
 function seriesSignature(series) {
-  return series.map((s) => `${s.datasetId}|${s.xCol}|${s.yCol}`).join(',')
+  return series
+    .map((s) => `${s.datasetId}|${s.xCol}|${s.yCol}|${s.axis || 'y'}|${s.color || ''}`)
+    .join(',')
 }
 
-function baseLayout(theme, xTitle) {
+// Margen reservado al eje secundario. Es un valor fijo (sin `automargin`), así
+// que el área de trazado es predecible y se puede igualar entre gráficos.
+const Y2_MARGIN = 56
+
+function baseLayout(theme, xTitle, card) {
   const t = THEME[theme] || THEME.dark
+  const hasY2 = card.series.some((s) => s.axis === 'y2')
+
+  // Alineación entre gráficos: el margen determina dónde empieza y acaba el
+  // área de trazado, no el ancho de la tarjeta. Si uno tiene eje derecho y
+  // otro no, sus áreas tienen anchos distintos y el mismo instante cae en
+  // píxeles distintos. Las tarjetas de un experimento reservan el hueco del
+  // eje secundario aunque no lo usen, así coinciden al píxel — también las
+  // sueltas, para que apilar dos a mano dé el mismo resultado.
+  const marginR = card.alignedMargin || card.groupId || hasY2 ? Y2_MARGIN : 14
+
   // No gridlines and no zero lines (per design): just the axis ticks/labels.
-  return {
+  const layout = {
     autosize: true,
     paper_bgcolor: t.paper,
     plot_bgcolor: t.paper,
     font: { color: t.font, family: 'ui-monospace, monospace', size: 11 },
-    margin: { l: 48, r: 14, t: 8, b: 34 },
+    margin: { l: 56, r: marginR, t: 8, b: 34 },
     showlegend: true,
     legend: { orientation: 'h', y: -0.18, font: { size: 10 } },
     xaxis: {
@@ -49,6 +66,32 @@ function baseLayout(theme, xTitle) {
     },
     yaxis: { showgrid: false, zeroline: false },
   }
+
+  // Rango fijo: es lo que mantiene alineados varios gráficos del mismo
+  // experimento aunque sus series cubran spans distintos.
+  if (card.xRange) {
+    layout.xaxis.range = [...card.xRange]
+  }
+
+  const yPrimary = card.series.find((s) => s.axis !== 'y2')
+  if (yPrimary) {
+    layout.yaxis.title = { text: yPrimary.name, font: { size: 10 } }
+    if (yPrimary.color) layout.yaxis.color = yPrimary.color
+  }
+
+  if (hasY2) {
+    const y2 = card.series.find((s) => s.axis === 'y2')
+    layout.yaxis2 = {
+      overlaying: 'y',
+      side: 'right',
+      showgrid: false,
+      zeroline: false,
+      title: { text: y2.name, font: { size: 10 } },
+      ...(y2.color ? { color: y2.color } : {}),
+    }
+  }
+
+  return layout
 }
 
 export default function ChartCard({
@@ -65,37 +108,73 @@ export default function ChartCard({
 }) {
   const plotRef = useRef(null)
   const drawnRef = useRef(false)
+  const applyingRef = useRef(false) // evita el bucle al propagar el rango
   const sig = seriesSignature(card.series)
 
   // Initial draw / redraw when the set of series changes (e.g. after a merge).
   useEffect(() => {
     const el = plotRef.current
-    if (!el) return
+    if (!el || card.loading) return
 
     const traces = card.series.map((s, i) => {
       const ds = getDataset(s.datasetId)
+      const color = s.color || PALETTE[i % PALETTE.length]
+      const mode = s.mode || 'lines'
       return {
         type: 'scattergl', // WebGL: handles hundreds of thousands of points
-        mode: 'lines',
+        mode,
         name: s.name,
         x: ds ? ds.data[s.xCol] : [],
         y: ds ? ds.data[s.yCol] : [],
-        line: { width: 1, color: PALETTE[i % PALETTE.length] },
+        yaxis: s.axis === 'y2' ? 'y2' : 'y',
+        ...(mode.includes('lines') ? { line: { width: 1, color } } : {}),
+        ...(mode.includes('markers') ? { marker: { size: 3, color } } : {}),
       }
     })
 
     const xTitle = card.series[0]?.xCol ?? ''
-    Plotly.react(el, traces, baseLayout(theme, xTitle), CONFIG).then(() => {
+    let unsubscribe = () => {}
+    let disposed = false
+
+    Plotly.react(el, traces, baseLayout(theme, xTitle, card), CONFIG).then(() => {
+      if (disposed) return
       drawnRef.current = true
       Plotly.Plots.resize(el)
+
+      // Eje de tiempo compartido con el resto del grupo. El flag `applying`
+      // corta el bucle: aplicar un rango recibido dispara otro plotly_relayout.
+      if (!card.groupId) return
+
+      el.on('plotly_relayout', (ev) => {
+        if (applyingRef.current) return
+        let range
+        if (ev['xaxis.autorange']) range = 'auto'
+        else if (ev['xaxis.range[0]'] !== undefined) {
+          range = [ev['xaxis.range[0]'], ev['xaxis.range[1]']]
+        } else return
+        publishAxis(card.groupId, card.id, range)
+      })
+
+      unsubscribe = subscribeAxis(card.groupId, (fromId, range) => {
+        if (fromId === card.id || !drawnRef.current) return
+        applyingRef.current = true
+        const patch = range === 'auto'
+          ? { 'xaxis.autorange': true }
+          : { 'xaxis.range': [...range] }
+        Plotly.relayout(el, patch).finally(() => {
+          applyingRef.current = false
+        })
+      })
     })
 
     return () => {
-      Plotly.purge(el)
+      disposed = true
+      unsubscribe()
+      Plotly.purge(el) // se lleva también los listeners de plotly
       drawnRef.current = false
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sig])
+  }, [sig, card.loading, card.groupId])
 
   // Restyle colors when the theme changes (no full redraw needed).
   useEffect(() => {
@@ -164,10 +243,12 @@ export default function ChartCard({
       >
         <div className="card-title">
           <span className="card-meta">
-            {card.series.length} {card.series.length === 1 ? 'signal' : 'signals'}
-            {nPoints ? ` · ${nPoints.toLocaleString()} pts` : ''}
+            {card.loading
+              ? card.title || 'loading…'
+              : `${card.series.length} ${card.series.length === 1 ? 'signal' : 'signals'}` +
+                (nPoints ? ` · ${nPoints.toLocaleString()} pts` : '')}
           </span>
-          {card.series.length > 1 && (
+          {!card.loading && card.series.length > 1 && (
             <button
               className="card-split"
               onMouseDown={(e) => e.stopPropagation()}
@@ -188,6 +269,17 @@ export default function ChartCard({
           </button>
         </div>
         <div className="card-plot" ref={plotRef} />
+        {card.loading && (
+          <div className="card-loading" role="status" aria-live="polite">
+            <span className="card-spinner" aria-hidden="true" />
+            <span className="card-loading-text">{card.loadingLabel || 'loading…'}</span>
+          </div>
+        )}
+        {card.error && !card.loading && (
+          <div className="card-loading card-failed" role="alert">
+            <span className="card-loading-text">⚠ {card.error}</span>
+          </div>
+        )}
         {isMergeTarget && <div className="merge-badge">Merge</div>}
       </div>
     </Rnd>

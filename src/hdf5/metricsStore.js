@@ -1,6 +1,6 @@
 // Persistencia del sidecar de métricas entre sesiones.
 //
-// El sidecar es un HDF5 real y exportable (ver `downloadSidecar`), pero el
+// El sidecar es un HDF5 real que genera scripts/compute_metrics.py, pero el
 // navegador no puede ir a buscarlo solo al disco junto al master. Para que
 // "calcular sólo lo que falte" funcione sin obligar al usuario a elegir un
 // archivo cada vez, los mismos bytes se cachean en IndexedDB indexados por
@@ -94,18 +94,4 @@ export async function clearSidecar(key) {
   } catch (e) {
     return false
   }
-}
-
-// Exporta el sidecar como archivo .h5 junto al master (descarga del navegador).
-export function downloadSidecar(bytes, masterName) {
-  const base = masterName.replace(/\.(hdf5|h5)$/i, '')
-  const blob = new Blob([bytes], { type: 'application/x-hdf5' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = `${base}.metrics.h5`
-  document.body.appendChild(a)
-  a.click()
-  a.remove()
-  setTimeout(() => URL.revokeObjectURL(url), 1000)
 }

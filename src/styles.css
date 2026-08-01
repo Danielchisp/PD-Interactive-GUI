@@ -515,22 +515,45 @@ body {
   color: var(--muted, #8a8f98);
   margin-top: 4px;
 }
+/* --- Carga de un gráfico ---------------------------------------------------- */
 
-.metrics-export {
-  position: fixed;
-  right: 16px;
-  bottom: 24px;
-  z-index: 9500;
-  padding: 7px 12px;
-  background: var(--panel-2);
-  border: 1px solid var(--line-2);
-  border-radius: 999px;
-  color: var(--text);
+.card-loading {
+  position: absolute;
+  inset: 34px 0 0 0;   /* justo bajo la barra de título (.card-title: 34px) */
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  background: var(--panel);
+  color: var(--muted);
   font-family: var(--font-mono);
   font-size: 11px;
-  cursor: pointer;
+  pointer-events: none;
+  border-radius: 0 0 7px 7px;
 }
 
-.metrics-export:hover {
-  border-color: var(--accent);
+.card-spinner {
+  width: 18px;
+  height: 18px;
+  border: 2px solid var(--line-2);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: card-spin 0.7s linear infinite;
+}
+
+@keyframes card-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .card-spinner { animation-duration: 2.4s; }
+}
+
+.card-loading-text {
+  letter-spacing: 0.04em;
+}
+
+.card-failed {
+  color: #ff8f5f;
 }
