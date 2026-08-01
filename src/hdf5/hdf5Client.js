@@ -11,9 +11,14 @@ function ensureWorker() {
     type: 'module',
   })
   worker.onmessage = (e) => {
-    const { id, ok, result, error } = e.data
+    const { id, ok, result, error, progress } = e.data
     const p = pending.get(id)
     if (!p) return
+    if (progress !== undefined) {
+      // Avance de una tarea larga: la promesa sigue viva.
+      p.onProgress?.(progress)
+      return
+    }
     pending.delete(id)
     ok ? p.resolve(result) : p.reject(new Error(error))
   }
@@ -25,11 +30,11 @@ function ensureWorker() {
   return worker
 }
 
-function call(type, payload, transfer = []) {
+function call(type, payload, transfer = [], onProgress = null) {
   const w = ensureWorker()
   const id = ++seq
   return new Promise((resolve, reject) => {
-    pending.set(id, { resolve, reject })
+    pending.set(id, { resolve, reject, onProgress })
     w.postMessage({ id, type, payload }, transfer)
   })
 }
@@ -43,4 +48,11 @@ export const hdf5 = {
   readGroupSummary: (test, path) => call('readGroupSummary', { test, path }),
   readGroupMatrix: (test, path) => call('readGroupSummary', { test, path }),
   signal: (test, chunk, row) => call('signal', { test, chunk, row }),
+
+  // --- Métricas -------------------------------------------------------------
+  metricsPlan: (sidecarBytes) => call('metricsPlan', { sidecarBytes }),
+  metricsRun: (sidecarBytes, onProgress) =>
+    call('metricsRun', { sidecarBytes }, [], onProgress),
+  readMetric: (test, sensor, key, sidecarBytes) =>
+    call('readMetric', { test, sensor, key, sidecarBytes }),
 }

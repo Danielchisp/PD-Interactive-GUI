@@ -7,7 +7,7 @@
 // identical to scipy's default.
 
 // In-place iterative radix-2 FFT (complex). Length must be a power of two.
-function fftRadix2(re, im) {
+export function fftRadix2(re, im) {
   const n = re.length
   for (let i = 1, j = 0; i < n; i += 1) {
     let bit = n >> 1

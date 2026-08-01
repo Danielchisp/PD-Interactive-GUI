@@ -6,7 +6,12 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "predev": "python3 scripts/compute_metrics.py",
+    "dev:fast": "vite",
+    "metrics": "python3 scripts/compute_metrics.py",
+    "metrics:check": "python3 scripts/compute_metrics.py --check",
+    "conformance": "node scripts/make_golden.mjs && python3 scripts/check_conformance.py"
   },
   "dependencies": {
     "h5wasm": "^0.10.3",
