@@ -48,7 +48,7 @@ function formatDuration(seconds) {
   return `${s}s`
 }
 
-export default function DataSourcePanel({ source, geom, onChange, onClose, onFocus }) {
+export default function DataSourcePanel({ source, geom, onChange, onClose, onFocus, onContextMenu }) {
   return (
     <Rnd
       className="card"
@@ -90,7 +90,7 @@ export default function DataSourcePanel({ source, geom, onChange, onClose, onFoc
         </div>
         <div className="ds-tree">
           {source.tests.map((t) => (
-            <TestNode key={t.name} test={t} />
+            <TestNode key={t.name} test={t} onContextMenu={onContextMenu} />
           ))}
         </div>
       </div>
@@ -98,7 +98,7 @@ export default function DataSourcePanel({ source, geom, onChange, onClose, onFoc
   )
 }
 
-function TestNode({ test }) {
+function TestNode({ test, onContextMenu }) {
   const [open, setOpen] = useState(false)
   const [children, setChildren] = useState(null)
   const [loading, setLoading] = useState(false)
@@ -145,7 +145,7 @@ function TestNode({ test }) {
           {loading && <div className="ds-hint">loading structure…</div>}
           {children &&
             sortGroups(children).map((item) => (
-              <ChildGroupNode key={item.name} testName={test.name} item={item} />
+              <ChildGroupNode key={item.name} testName={test.name} item={item} onContextMenu={onContextMenu} />
             ))}
         </div>
       )}
@@ -153,7 +153,7 @@ function TestNode({ test }) {
   )
 }
 
-function ChildGroupNode({ testName, item }) {
+function ChildGroupNode({ testName, item, onContextMenu }) {
   const [open, setOpen] = useState(false)
 
   const toggle = useCallback(() => {
@@ -190,6 +190,15 @@ function ChildGroupNode({ testName, item }) {
         className="ds-row ds-chunk"
         style={{ cursor: 'grab', display: 'flex', alignItems: 'center' }}
         {...draggableProps}
+        onContextMenu={(e) => {
+          if (!isHumidityGroup) {
+            e.preventDefault()
+            e.stopPropagation()
+            if (onContextMenu) {
+              onContextMenu(testName, item.name, { x: e.clientX, y: e.clientY })
+            }
+          }
+        }}
       >
         <button
           onClick={(e) => {

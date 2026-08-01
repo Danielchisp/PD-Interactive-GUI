@@ -70,6 +70,9 @@ body {
   position: absolute;
   z-index: 9000;
   min-width: 168px;
+  max-height: 280px;
+  overflow-y: auto;
+  overflow-x: hidden;
   background: var(--panel-2);
   border: 1px solid var(--line-2);
   border-radius: 8px;

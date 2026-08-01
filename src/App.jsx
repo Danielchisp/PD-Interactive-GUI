@@ -13,7 +13,7 @@ import {
   sidecarKey,
 } from './hdf5/metricsStore.js'
 import { compute } from './compute/computeClient.js'
-import { METRICS } from './compute/metrics.js'
+import { METRICS, METRIC_KEYS_12 } from './compute/metrics.js'
 import { opsFor } from './compute/operations.js'
 import {
   deleteDataset,
@@ -78,6 +78,10 @@ export default function App() {
     const card = cardsRef.current.find((c) => c.id === cardId)
     if (!card || opsFor(card.domain).length === 0) return
     setMenu({ kind: 'card', cardId, ...pos })
+  }, [])
+
+  const openSensorMenu = useCallback((test, sensor, pos) => {
+    setMenu({ kind: 'sensorGroup', test, sensor, ...pos })
   }, [])
 
   // --- Card creation --------------------------------------------------------
@@ -457,29 +461,30 @@ export default function App() {
     ]
   }, [])
 
-  // Vpp por sensor. El valor sale del sidecar ya calculado — el frontend no
+  // Métricas por sensor. El valor sale del sidecar ya calculado — el frontend no
   // computa métricas — y el eje X de los timestamps del master, que el
   // sidecar no guarda.
-  const buildVppChart = useCallback(async (test, sensor, t0, color) => {
+  const buildMetricChart = useCallback(async (test, sensor, metricKey, t0, color) => {
     if (!metrics?.bytes) throw new Error('sin métricas: ejecuta npm run metrics')
 
     const [m, ts] = await Promise.all([
-      hdf5.readMetric(test, sensor, 'vpp', metrics.bytes),
+      hdf5.readMetric(test, sensor, metricKey, metrics.bytes),
       hdf5.readTimestamps(test, sensor),
     ])
     const n = Math.min(m.n, ts.n)
     const xs = new Float64Array(n)
     for (let i = 0; i < n; i += 1) xs[i] = ts.values[i] - t0
 
-    const ycol = `Vpp (V) · ${sensor.toUpperCase()}`
+    const metricLabel = METRICS[metricKey]?.label || metricKey
+    const ycol = `${metricLabel} · ${sensor.toUpperCase()}`
     const id = nextDatasetId()
     putDataset({
       id,
-      name: `${sensor.toUpperCase()} Vpp - ${test}`,
+      name: `${sensor.toUpperCase()} ${metricLabel} - ${test}`,
       columns: [XCOL, ycol],
       rowCount: n,
       data: { [XCOL]: xs, [ycol]: m.values.subarray(0, n) },
-      meta: { test, sensor, metricKey: 'vpp', fromSidecar: true },
+      meta: { test, sensor, metricKey, fromSidecar: true },
     })
 
     return [{ datasetId: id, xCol: XCOL, yCol: ycol, name: ycol, color, mode: 'markers' }]
@@ -489,9 +494,9 @@ export default function App() {
   // nombre del grupo en el HDF5, para poder resolver un arrastre suelto.
   const chartSpecs = useMemo(() => [
     { key: 'humidity', label: 'Temp/Hum Data', build: (t, t0) => buildEnvChart(t, t0) },
-    { key: 'uhf', label: 'UHF Data · Vpp', build: (t, t0) => buildVppChart(t, 'uhf', t0, '#5fd68a') },
-    { key: 'ae', label: 'AE Data · Vpp', build: (t, t0) => buildVppChart(t, 'ae', t0, '#ffcf5f') },
-  ], [buildEnvChart, buildVppChart])
+    { key: 'uhf', label: 'UHF Data · Vpp', build: (t, t0) => buildMetricChart(t, 'uhf', 'vpp', t0, '#5fd68a') },
+    { key: 'ae', label: 'AE Data · Vpp', build: (t, t0) => buildMetricChart(t, 'ae', 'vpp', t0, '#ffcf5f') },
+  ], [buildEnvChart, buildMetricChart])
 
   const patchCard = useCallback((id, p) => {
     setCards((prev) => prev.map((c) => (c.id === id ? { ...c, ...p } : c)))
@@ -587,6 +592,41 @@ export default function App() {
       patchCard(id, { loading: false, error: err?.message || 'failed' })
     }
   }, [chartSpecs, patchCard])
+
+  const renderMetricChart = useCallback(async (test, sensor, metricKey, at) => {
+    const metricLabel = METRICS[metricKey]?.label || metricKey
+    const sensorLabel = sensor.toUpperCase()
+    const shortDate = test.replace('Test - ', '').replace(/Z$/, '')
+    const id = nextCardId()
+    const color = sensor === 'uhf' ? '#5fd68a' : '#ffcf5f'
+
+    setCards((prev) => [
+      ...prev,
+      {
+        id,
+        title: `${sensorLabel} Data · ${metricLabel} · ${shortDate}`,
+        domain: 'time',
+        series: [],
+        source: null,
+        loading: true,
+        loadingLabel: `${metricLabel}…`,
+        alignedMargin: true,
+        x: snap(at.x),
+        y: snap(at.y),
+        width: CARD_DEFAULT.width,
+        height: 224,
+        z: bumpZ(),
+      },
+    ])
+
+    try {
+      const info = await hdf5.experimentT0(test)
+      const series = await buildMetricChart(test, sensor, metricKey, info.t0, color)
+      patchCard(id, { loading: false, xRange: [0, info.durationS], series })
+    } catch (err) {
+      patchCard(id, { loading: false, error: err?.message || 'failed' })
+    }
+  }, [buildMetricChart, patchCard])
 
   // onDropSignal se declara antes, así que los alcanza por ref.
   const dropExperimentRef = useRef(dropExperiment)
@@ -750,6 +790,13 @@ export default function App() {
     if (m.kind === 'canvas') {
       return [{ glyph: '⛃', label: 'Open HDF5…', onClick: openHdf5 }]
     }
+    if (m.kind === 'sensorGroup') {
+      return METRIC_KEYS_12.map((key) => ({
+        glyph: '📈',
+        label: METRICS[key]?.label || key,
+        onClick: () => renderMetricChart(m.test, m.sensor, key, { x: m.x, y: m.y })
+      }))
+    }
     const card = cards.find((c) => c.id === m.cardId)
     return opsFor(card?.domain).map((op) => ({
       glyph: op.glyph,
@@ -796,6 +843,7 @@ export default function App() {
             onChange={updateSourceGeom}
             onClose={closeSource}
             onFocus={focusSource}
+            onContextMenu={openSensorMenu}
           />
         )}
       </Canvas>
