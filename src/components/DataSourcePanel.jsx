@@ -10,6 +10,44 @@ import { snap } from '../constants.js'
 
 const ROW_H = 22
 
+// Nombres de cara al usuario. Las claves son los grupos tal como vienen en el
+// HDF5; cualquier otra se muestra con su nombre crudo.
+const GROUP_LABELS = {
+  uhf: 'UHF Data',
+  ae: 'AE Data',
+  humidity: 'Temp/Hum Data',
+}
+
+export const groupLabelFor = (name) => GROUP_LABELS[name] || name
+
+// El HDF5 devuelve las claves en orden alfabético (ae, humidity, uhf); en la
+// UI mandan los sensores. Lo que no esté aquí va después, alfabéticamente.
+const GROUP_ORDER = ['uhf', 'ae', 'humidity']
+
+const rankOf = (name) => {
+  const i = GROUP_ORDER.indexOf(name)
+  return i === -1 ? GROUP_ORDER.length : i
+}
+
+function sortGroups(items) {
+  return [...items].sort((a, b) => {
+    const d = rankOf(a.name) - rankOf(b.name)
+    return d !== 0 ? d : a.name.localeCompare(b.name)
+  })
+}
+
+// Duración legible del span de un grupo: "2h 14m", "37m 12s", "45s".
+function formatDuration(seconds) {
+  if (seconds == null || !Number.isFinite(seconds)) return null
+  const total = Math.round(seconds)
+  const h = Math.floor(total / 3600)
+  const m = Math.floor((total % 3600) / 60)
+  const s = total % 60
+  if (h > 0) return `${h}h ${String(m).padStart(2, '0')}m`
+  if (m > 0) return `${m}m ${String(s).padStart(2, '0')}s`
+  return `${s}s`
+}
+
 export default function DataSourcePanel({ source, geom, onChange, onClose, onFocus }) {
   return (
     <Rnd
@@ -83,18 +121,30 @@ function TestNode({ test }) {
 
   return (
     <div className="ds-node">
-      <button className="ds-row ds-test" onClick={toggle}>
+      {/* Arrastrar el experimento entero genera los tres gráficos alineados */}
+      <button
+        className="ds-row ds-test"
+        onClick={toggle}
+        draggable
+        onDragStart={(e) => {
+          e.dataTransfer.effectAllowed = 'copy'
+          e.dataTransfer.setData(
+            'application/x-hdf5-signal',
+            JSON.stringify({ kind: 'experiment', test: test.name }),
+          )
+        }}
+        title="Drag to the canvas for the full experiment overview"
+      >
         <Caret open={open} />
         <span className="ds-label" title={test.name}>
           {shortDate}
         </span>
-        <span className="ds-count">{test.nChildren} elementos</span>
       </button>
       {open && (
         <div className="ds-children">
-          {loading && <div className="ds-hint">cargando estructura…</div>}
+          {loading && <div className="ds-hint">loading structure…</div>}
           {children &&
-            children.map((item) => (
+            sortGroups(children).map((item) => (
               <ChildGroupNode key={item.name} testName={test.name} item={item} />
             ))}
         </div>
@@ -110,23 +160,25 @@ function ChildGroupNode({ testName, item }) {
     setOpen((prev) => !prev)
   }, [])
 
-  // Si tiene nSignals > 0 (ej. ae con 12103 o uhf con 89 señales), mostramos lista de señales
+  // Con nSignals > 0 (p.ej. AE con 12103 o UHF con 89) se lista cada señal.
   const isSignalMatrix = item.nSignals > 0
   const isHumidityGroup = item.name === 'humidity'
-  const groupLabel = isHumidityGroup ? 'ambiental' : item.name
+  const groupLabel = groupLabelFor(item.name)
+  const duration = formatDuration(item.durationS)
 
   const draggableProps = {
     draggable: true,
     onDragStart: (e) => {
       e.dataTransfer.effectAllowed = 'copy'
+      // Un grupo suelto da el mismo gráfico que aporta al bloque del
+      // experimento; lo construye el mismo código en App.
       e.dataTransfer.setData(
         'application/x-hdf5-signal',
         JSON.stringify({
-          kind: isHumidityGroup ? 'humidity' : 'groupSeries',
+          kind: 'sensorChart',
           test: testName,
           path: item.name,
-          datasetName: 'data',
-          label: `${groupLabel.toUpperCase()} (${testName})`,
+          label: `${groupLabel} (${testName})`,
         }),
       )
     },
@@ -160,17 +212,9 @@ function ChildGroupNode({ testName, item }) {
           <span className="ds-label" style={{ fontWeight: 'bold' }}>
             {groupLabel}
           </span>
-          {isSignalMatrix ? (
-            <span className="ds-count">
-              {item.nSignals} señales ({item.nSamples} pts)
-            </span>
-          ) : item.datasets.length > 0 ? (
-            <span className="ds-count">{item.datasets.length} vars</span>
-          ) : null}
+          {duration && <span className="ds-count">{duration}</span>}
         </button>
       </div>
-
-
 
       {open && (
         <div className="ds-children">
@@ -178,8 +222,8 @@ function ChildGroupNode({ testName, item }) {
             <SignalList
               testName={testName}
               path={item.name}
+              label={groupLabel}
               count={item.nSignals}
-              nSamples={item.nSamples}
             />
           ) : (
             item.datasets.map((dsName) => (
@@ -199,10 +243,9 @@ function ChildGroupNode({ testName, item }) {
 
 function DatasetItemNode({ testName, path, datasetName }) {
   const isHumidityGroup = path === 'humidity'
-  const displayGroupName = isHumidityGroup ? 'ambiental' : path
   const label = isHumidityGroup
     ? `${datasetName} (${testName})`
-    : `${path} / ${datasetName}`
+    : `${groupLabelFor(path)} / ${datasetName}`
 
   return (
     <div
@@ -226,13 +269,13 @@ function DatasetItemNode({ testName, path, datasetName }) {
     >
       <span className="ds-sig-dot" />
       {datasetName}
-      {isHumidityGroup && <span className="ds-sig-row"> (serie temporal)</span>}
+      {isHumidityGroup && <span className="ds-sig-row"> (time series)</span>}
     </div>
   )
 }
 
-// Lista virtualizada para renderizar eficientemente miles de señales (ej. 12,103 señales AE)
-function SignalList({ testName, path, count, nSamples }) {
+// Lista virtualizada, para renderizar miles de señales sin coste (p.ej. 12.103 de AE)
+function SignalList({ testName, path, label: groupLabel, count }) {
   const [scrollTop, setScrollTop] = useState(0)
   const viewH = Math.min(count * ROW_H, 220)
   const total = count * ROW_H
@@ -242,7 +285,7 @@ function SignalList({ testName, path, count, nSamples }) {
 
   const rows = []
   for (let i = first; i < last; i += 1) {
-    const label = `${path.toUpperCase()} · Medida #${i + 1} (${nSamples} pts)`
+    const label = `${groupLabel} · #${i + 1}`
     rows.push(
       <div
         key={i}
@@ -264,8 +307,7 @@ function SignalList({ testName, path, count, nSamples }) {
         }}
       >
         <span className="ds-sig-dot" />
-        {path} #${i + 1}
-        <span className="ds-sig-row">índice {i}</span>
+        {`#${i + 1}`}
       </div>,
     )
   }

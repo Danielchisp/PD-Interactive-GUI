@@ -49,6 +49,9 @@ export const hdf5 = {
   readGroupMatrix: (test, path) => call('readGroupSummary', { test, path }),
   signal: (test, chunk, row) => call('signal', { test, chunk, row }),
 
+  readTimestamps: (test, path) => call('readTimestamps', { test, path }),
+  experimentT0: (test) => call('experimentT0', { test }),
+
   // --- Métricas -------------------------------------------------------------
   metricsPlan: (sidecarBytes) => call('metricsPlan', { sidecarBytes }),
   metricsRun: (sidecarBytes, onProgress) =>
