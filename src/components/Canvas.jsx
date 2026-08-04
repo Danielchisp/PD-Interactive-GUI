@@ -49,6 +49,18 @@ export default function Canvas({ children, onOpenMenu, onDismiss, hasMenu, onDro
   const viewRef = useRef(view)
   viewRef.current = view
 
+  // Gesto en curso. Sólo mientras dura se deja `will-change` puesto: en reposo
+  // hay que quitarlo para que el navegador vuelva a rasterizar a la escala final
+  // en vez de escalar la textura que tenía cacheada.
+  const [busy, setBusy] = useState(false)
+  const idleRef = useRef(0)
+  const markBusy = useCallback(() => {
+    setBusy(true)
+    clearTimeout(idleRef.current)
+    idleRef.current = setTimeout(() => setBusy(false), 180)
+  }, [])
+  useEffect(() => () => clearTimeout(idleRef.current), [])
+
   // Pantalla → mundo. `rect` es el viewport, que no se mueve.
   const toWorld = useCallback((clientX, clientY) => {
     const rect = ref.current.getBoundingClientRect()
@@ -70,6 +82,7 @@ export default function Canvas({ children, onOpenMenu, onDismiss, hasMenu, onDro
       // Dentro de un gráfico manda Plotly (scrollZoom sobre sus ejes).
       if (e.target.closest?.('.card')) return
       e.preventDefault()
+      markBusy()
       const rect = el.getBoundingClientRect()
       const px = e.clientX - rect.left
       const py = e.clientY - rect.top
@@ -84,7 +97,7 @@ export default function Canvas({ children, onOpenMenu, onDismiss, hasMenu, onDro
 
     el.addEventListener('wheel', onWheel, { passive: false })
     return () => el.removeEventListener('wheel', onWheel)
-  }, [])
+  }, [markBusy])
 
   // Arrastrar el fondo desplaza. Un clic sin movimiento sigue abriendo el menú,
   // así que el gesto no se decide al pulsar sino al soltar.
@@ -115,6 +128,7 @@ export default function Canvas({ children, onOpenMenu, onDismiss, hasMenu, onDro
     if (frameRef.current) return
     frameRef.current = requestAnimationFrame(() => {
       frameRef.current = 0
+      markBusy()
       setView((v) => ({ ...v, x: p.originX + dx, y: p.originY + dy }))
     })
   }
@@ -173,7 +187,7 @@ export default function Canvas({ children, onOpenMenu, onDismiss, hasMenu, onDro
       onDragOver={handleDragOver}
     >
       <div
-        className="canvas-world"
+        className={`canvas-world${busy || panning ? ' busy' : ''}`}
         style={{
           transform: `translate3d(${view.x}px, ${view.y}px, 0) scale(${view.k})`,
         }}

@@ -6,7 +6,7 @@ import DataSourcePanel, { groupLabelFor } from './components/DataSourcePanel.jsx
 import { hdf5 } from './hdf5/hdf5Client.js'
 import { fetchSidecar, sidecarName } from './hdf5/metricsStore.js'
 import { compute } from './compute/computeClient.js'
-import { METRICS, METRIC_KEYS_12 } from './compute/metrics.js'
+import { METRICS, METRIC_KEYS_UI, isRuntimeMetric, localRate } from './compute/metrics.js'
 import { DEFAULT_SMOOTHING } from './compute/trend.js'
 import { opsFor } from './compute/operations.js'
 import {
@@ -570,15 +570,19 @@ export default function App() {
   // —el frontend no computa métricas— y el eje X de los timestamps del master,
   // que el sidecar no guarda.
   const buildMetricChart = useCallback(async (test, sensor, t0, color, metricKey) => {
-    if (!metrics?.bytes) throw new Error('no metrics: run npm run metrics')
+    // La densidad se calcula aquí a partir de los timestamps; el sidecar sólo
+    // hace falta para las 12 que sí son propiedades de una señal.
+    const runtime = isRuntimeMetric(metricKey)
+    if (!runtime && !metrics?.bytes) throw new Error('no metrics: run npm run metrics')
 
     const [m, ts] = await Promise.all([
-      hdf5.readMetric(test, sensor, metricKey, metrics.bytes),
+      runtime ? null : hdf5.readMetric(test, sensor, metricKey, metrics.bytes),
       hdf5.readTimestamps(test, sensor),
     ])
-    const n = Math.min(m.n, ts.n)
+    const n = runtime ? ts.n : Math.min(m.n, ts.n)
     const xs = new Float64Array(n)
     for (let i = 0; i < n; i += 1) xs[i] = ts.values[i] - t0
+    const values = runtime ? localRate(ts.values, n) : m.values.subarray(0, n)
 
     const ycol = metricLabel(metricKey, sensor)
     const id = nextDatasetId()
@@ -587,7 +591,7 @@ export default function App() {
       name: `${sensor.toUpperCase()} ${metricKey} - ${test}`,
       columns: [XCOL, ycol],
       rowCount: n,
-      data: { [XCOL]: xs, [ycol]: m.values.subarray(0, n) },
+      data: { [XCOL]: xs, [ycol]: values },
       // `perSignal`: cada fila es una señal, no una muestra. Es lo que autoriza
       // a enmascarar esta serie con las señales descartadas — y lo que permite
       // volver del punto del scatter a la señal, porque el índice del punto es
@@ -595,7 +599,7 @@ export default function App() {
       // `t0` viaja con el dataset porque al fusionar dos experimentos cada
       // serie conserva el suyo: sin él, reconstruir la métrica de una serie
       // ajena la referiría al origen de tiempo del otro experimento.
-      meta: { test, sensor, metricKey, t0, perSignal: true, fromSidecar: true },
+      meta: { test, sensor, metricKey, t0, perSignal: true, fromSidecar: !runtime },
     })
 
     return [{
@@ -617,13 +621,22 @@ export default function App() {
   // rectángulo o lazo selecciona señales, y descartarlas las quita de todas las
   // métricas de ese sensor.
   const buildScatterChart = useCallback(async (test, sensor, xMetric, yMetric, color) => {
-    if (!metrics?.bytes) throw new Error('no metrics: run npm run metrics')
+    // Cualquiera de los dos ejes puede ser la densidad, que no está en el
+    // sidecar: sólo se exige el sidecar si alguno de los dos sí lo necesita.
+    const xr = isRuntimeMetric(xMetric)
+    const yr = isRuntimeMetric(yMetric)
+    if (!(xr && yr) && !metrics?.bytes) throw new Error('no metrics: run npm run metrics')
 
-    const [mx, my] = await Promise.all([
-      hdf5.readMetric(test, sensor, xMetric, metrics.bytes),
-      hdf5.readMetric(test, sensor, yMetric, metrics.bytes),
+    const [mx, my, ts] = await Promise.all([
+      xr ? null : hdf5.readMetric(test, sensor, xMetric, metrics.bytes),
+      yr ? null : hdf5.readMetric(test, sensor, yMetric, metrics.bytes),
+      xr || yr ? hdf5.readTimestamps(test, sensor) : null,
     ])
-    const n = Math.min(mx.n, my.n)
+    const lengths = [mx?.n, my?.n, ts?.n].filter((v) => Number.isFinite(v))
+    const n = Math.min(...lengths)
+    const rate = ts ? localRate(ts.values, n) : null
+    const xv = xr ? rate : mx.values.subarray(0, n)
+    const yv = yr ? rate : my.values.subarray(0, n)
     const xcol = metricLabel(xMetric, sensor)
     const ycol = metricLabel(yMetric, sensor)
     // Dos métricas distintas del mismo sensor pueden dar la misma etiqueta si
@@ -636,8 +649,11 @@ export default function App() {
       name: `${sensor.toUpperCase()} ${yMetric} vs ${xMetric} - ${test}`,
       columns: [xcol, yname],
       rowCount: n,
-      data: { [xcol]: mx.values.subarray(0, n), [yname]: my.values.subarray(0, n) },
-      meta: { test, sensor, metricKey: yMetric, xMetric, perSignal: true, fromSidecar: true },
+      data: { [xcol]: xv, [yname]: yv },
+      meta: {
+        test, sensor, metricKey: yMetric, xMetric, perSignal: true,
+        fromSidecar: !(xr && yr),
+      },
     })
 
     return [{
@@ -1263,7 +1279,7 @@ export default function App() {
             onClose={() => removeCard(card.id)}
             onFocus={() => focusCard(card.id)}
             onContextMenu={(pos) => openCardMenu(card.id, pos)}
-            metricKeys={METRIC_KEYS_12}
+            metricKeys={METRIC_KEYS_UI}
             onMetricChange={(axis, key) => changeMetric(card.id, axis, key)}
             onToggleTrend={() => toggleTrend(card.id)}
             onSmoothingChange={(value) => setSmoothing(card.id, value)}

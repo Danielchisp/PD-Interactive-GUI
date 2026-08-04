@@ -141,10 +141,9 @@ function edgeFactor(t, first, last, tau) {
  * Tendencia de (xs, ys) sobre el tramo [from, to]. `params` viene de
  * `trendParams()`.
  *
- * Devuelve { x, mid, lo, hi } o null. Son arrays normales, no tipados, porque
- * llevan `null` donde la línea se corta — que es como Plotly interrumpe una
- * traza. `mid` es el nivel atenuado por el soporte; `lo`/`hi` son mid ∓ la
- * dispersión, atenuada igual.
+ * Devuelve { x, mid } o null. Son arrays normales, no tipados, porque llevan
+ * `null` donde la línea se corta — que es como Plotly interrumpe una traza.
+ * `mid` es el nivel atenuado por el soporte.
  */
 export function trendCurve(xs, ys, params) {
   const n = Math.min(xs?.length ?? 0, ys?.length ?? 0)
@@ -209,16 +208,12 @@ export function trendCurve(xs, ys, params) {
   const last = xs[n - 1]
   const x = new Array(m)
   const mid = new Array(m)
-  const lo = new Array(m)
-  const hi = new Array(m)
 
   for (let i = 0; i < m; i += 1) {
     x[i] = grid[i]
     const w = f1.W[i] + b1.W[i]
     if (w < BREAK_SUPPORT) {
       mid[i] = null
-      lo[i] = null
-      hi[i] = null
       continue
     }
     // `presence` es lo que hace que la curva se lea como actividad: con soporte
@@ -228,12 +223,8 @@ export function trendCurve(xs, ys, params) {
     // pasado nada.
     const needed = FULL_SUPPORT * edgeFactor(grid[i], first, last, tau)
     const presence = Math.min(1, w / needed)
-    const level = ((f1.N[i] + b1.N[i]) / w) * presence
-    const spread = scale[i] * presence
-    mid[i] = level
-    lo[i] = level - spread
-    hi[i] = level + spread
+    mid[i] = ((f1.N[i] + b1.N[i]) / w) * presence
   }
 
-  return { x, mid, lo, hi }
+  return { x, mid }
 }

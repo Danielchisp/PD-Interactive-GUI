@@ -72,6 +72,16 @@ body {
   width: 0;
   height: 0;
   transform-origin: 0 0;
+}
+
+/* `will-change` SÓLO mientras se desplaza o se hace zoom.
+   Permanente es contraproducente: promueve la capa al compositor, que rasteriza
+   una vez y luego escala esa textura, así que al acercarse los gráficos se veían
+   ampliados como mapa de bits en vez de redibujados. Quitándolo en reposo, el
+   navegador vuelve a rasterizar el SVG a la escala final y la tipografía y las
+   líneas salen nítidas. Durante el gesto sí interesa, que es cuando compensa
+   componer en GPU en vez de repintar en cada frame. */
+.canvas-world.busy {
   will-change: transform;
 }
 

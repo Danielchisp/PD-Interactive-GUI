@@ -1,4 +1,4 @@
-import { useContext, useEffect, useRef } from 'react'
+import { useContext, useEffect, useRef, useState } from 'react'
 import { Rnd } from 'react-rnd'
 import Plotly from 'plotly.js-dist-min'
 import { METRICS } from '../compute/metrics.js'
@@ -33,17 +33,8 @@ export const PALETTE = [
 // Plotly no lee variables CSS, así que los valores se repiten aquí a mano.
 const PLOT_THEME = { paper: '#0a0a0c', font: '#c9c9d2' }
 
-// Trazas que aporta la tendencia por cada serie: borde inferior, borde superior
-// (que rellena hasta el anterior) y la curva. El relleno de Plotly va contra la
-// traza previa, así que las dos de la banda tienen que ir seguidas y en ese
-// orden.
-const TREND_TRACES = 3
-
-const withAlpha = (hex, alpha) => {
-  const h = hex.replace('#', '')
-  const n = parseInt(h.length === 3 ? h.replace(/./g, (c) => c + c) : h, 16)
-  return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${alpha})`
-}
+// Trazas que aporta la tendencia por cada serie: sólo la curva.
+const TREND_TRACES = 1
 
 // Opacidad de la nube cuando hay tendencia encima. Los puntos siguen ahí —se
 // pueden clicar y seleccionar para descartar—, sólo ceden el primer plano.
@@ -322,6 +313,27 @@ export default function ChartCard({
   excludedCount = 0,
 }) {
   const scale = useContext(CanvasViewContext)
+
+  // Zoom del lienzo una vez quieto.
+  //
+  // Las trazas `scattergl` pintan en un canvas WebGL, y ese es un mapa de bits
+  // de verdad: por mucho que el navegador vuelva a rasterizar el SVG de
+  // alrededor, ampliar el canvas lo emborrona. La única salida es redibujarlo a
+  // más densidad, y eso es un replot entero — demasiado caro para hacerlo en
+  // cada muesca de la rueda, así que se espera a que el gesto termine.
+  const [settledScale, setSettledScale] = useState(scale)
+  useEffect(() => {
+    const id = setTimeout(() => setSettledScale(scale), 200)
+    return () => clearTimeout(id)
+  }, [scale])
+
+  // Sólo los que de verdad usan WebGL pagan el replot. `rowCount` es anterior a
+  // la máscara y a la decimación, así que puede sobrestimar; da igual, sólo
+  // decide si vale la pena redibujar.
+  const usesGL = card.series.some(
+    (s) => (getDataset(s.datasetId)?.rowCount ?? 0) > GL_THRESHOLD,
+  )
+  const glRatio = usesGL ? Math.max(1, settledScale) : 1
   const plotRef = useRef(null)
   const drawnRef = useRef(false)
   const applyingRef = useRef(false) // evita el bucle al propagar el rango
@@ -436,32 +448,21 @@ export default function ChartCard({
     dataCountRef.current = traces.length
 
     // --- Tendencia ------------------------------------------------------------
-    // Se añaden SIEMPRE las tres trazas por serie cuando la tendencia está
-    // encendida, aunque una salga vacía: los índices de traza tienen que ser
-    // estables para que el restyle del zoom sepa a quién escribe.
+    // Se añade SIEMPRE una traza por serie cuando la tendencia está encendida,
+    // aunque salga vacía: los índices de traza tienen que ser estables para que
+    // el restyle del zoom sepa a quién escribe.
     if (trendOn) {
       card.series.forEach((s, i) => {
-        const color = colors[i]
-        const axis = s.axis === 'y2' ? 'y2' : 'y'
-        const shared = {
+        traces.push({
           type: 'scatter',
           mode: 'lines',
-          yaxis: axis,
+          yaxis: s.axis === 'y2' ? 'y2' : 'y',
           showlegend: false,
           hoverinfo: 'skip',
-        }
-        traces.push(
-          { ...shared, x: [], y: [], line: { width: 0, color } },
-          {
-            ...shared,
-            x: [],
-            y: [],
-            line: { width: 0, color },
-            fill: 'tonexty',
-            fillcolor: withAlpha(color, 0.16),
-          },
-          { ...shared, x: [], y: [], line: { width: 2, color } },
-        )
+          x: [],
+          y: [],
+          line: { width: 2, color: colors[i] },
+        })
       })
     }
 
@@ -493,18 +494,21 @@ export default function ChartCard({
       const indices = []
       masked.forEach((m, i) => {
         const t = trendCurve(m.x, m.y, params)
-        const base = dataCountRef.current + i * TREND_TRACES
-        const empty = []
-        xsOut.push(t ? t.x : empty, t ? t.x : empty, t ? t.x : empty)
-        ys.push(t ? t.lo : empty, t ? t.hi : empty, t ? t.mid : empty)
-        indices.push(base, base + 1, base + 2)
+        xsOut.push(t ? t.x : [])
+        ys.push(t ? t.mid : [])
+        indices.push(dataCountRef.current + i * TREND_TRACES)
       })
       if (indices.length > 0) Plotly.restyle(el, { x: xsOut, y: ys }, indices)
     }
 
     // Modebar fijo donde se puede descartar: es donde hacen falta el rectángulo
     // y el lazo, y donde la barra de título trae el botón para aplicarlo.
-    const config = canSelect ? SELECT_CONFIG : CONFIG
+    // La densidad del canvas WebGL se multiplica por el zoom del lienzo, para
+    // que acercarse no amplíe píxeles sino que redibuje.
+    const base = canSelect ? SELECT_CONFIG : CONFIG
+    const config = glRatio > 1
+      ? { ...base, plotGlPixelRatio: (window.devicePixelRatio || 1) * glRatio }
+      : base
     Plotly.react(el, traces, baseLayout(xTitle, card), config).then(() => {
       if (disposed) return
       drawnRef.current = true
@@ -624,7 +628,7 @@ export default function ChartCard({
       drawnRef.current = false
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sig, card.loading, card.groupId, isMetricChart, canSelect, maskSig, trendOn, smoothing])
+  }, [sig, card.loading, card.groupId, isMetricChart, canSelect, maskSig, trendOn, smoothing, glRatio])
 
   // Keep Plotly filling the container as the card is resized (live).
   useEffect(() => {

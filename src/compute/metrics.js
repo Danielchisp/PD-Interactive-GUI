@@ -25,7 +25,11 @@ export const METRICS = {
   shannon: { key: 'shannon', label: 'Shannon Entropy', unit: 'bits' },
   dt: { key: 'dt', label: 'Delta T', unit: 's' },
   logdt: { key: 'logdt', label: 'Log Delta T', unit: '' },
-  tasa_pulsos: { key: 'tasa_pulsos', label: 'Pulse Rate', unit: 'Hz' },
+  // Escalar por grupo: sale igual para todas las señales del experimento, así
+  // que como serie temporal es una recta. La densidad que sí varía en el tiempo
+  // es `rate`, más abajo.
+  tasa_pulsos: { key: 'tasa_pulsos', label: 'Pulse Rate (whole group)', unit: 'Hz' },
+  rate: { key: 'rate', label: 'Pulse Rate', unit: 'Hz' },
   tasa_energia: { key: 'tasa_energia', label: 'Energy Rate', unit: 'rel/s' },
 }
 
@@ -294,6 +298,72 @@ export const METRIC_KEYS_12 = [
   'energia_j',
   'feq',
 ]
+
+// --- Densidad de descargas ---------------------------------------------------
+//
+// Métricas que NO viven en el sidecar porque no son propiedades de una señal.
+// La densidad lo es del proceso de llegada: sale entera de los timestamps, que
+// la GUI ya lee para el eje X. Calcularla en Python obligaría a una columna por
+// señal, a recalcular el master entero y a congelar dentro del archivo una
+// ventana que en realidad es una decisión de visualización.
+export const RUNTIME_METRICS = new Set(['rate'])
+export const isRuntimeMetric = (key) => RUNTIME_METRICS.has(key)
+
+// Las que ofrece el desplegable: las 12 del sidecar más las de runtime.
+// METRIC_KEYS_12 se queda intacto — es el contrato con los archivos escritos.
+export const METRIC_KEYS_UI = [...METRIC_KEYS_12, ...RUNTIME_METRICS]
+
+// Vecinos a cada lado que definen la ventana local.
+const RATE_K = 10
+
+// Cuánto se puede ensanchar la ventana buscando duración no nula, si hay
+// timestamps repetidos. Acotado para que el caso patológico —media serie con el
+// mismo instante— no degenere en O(n²).
+const RATE_MAX_WIDEN = 200
+
+/**
+ * Descargas por segundo alrededor de cada señal, a partir de sus timestamps
+ * (ascendentes). Devuelve un Float64Array de `n` valores en Hz.
+ *
+ * Ventana de K VECINOS y no de anchura fija en segundos. En estos datos la tasa
+ * de llegada abarca unos cinco órdenes de magnitud —la mediana de Δt en UHF es
+ * de 20 ms y el percentil 99 llega a 940 s—, y ninguna anchura fija sirve para
+ * los dos extremos: la que resuelve una ráfaga da cero durante todos los
+ * silencios, y la que mide un silencio aplana la ráfaga hasta borrarla. Con K
+ * vecinos la ventana se estrecha sola donde hay muchos puntos y se ensancha
+ * donde hay pocos.
+ *
+ * El valor es (nº de intervalos)/(duración), es decir el recíproco del intervalo
+ * medio local. Cerca de los extremos la ventana se desplaza hacia dentro en vez
+ * de encogerse, para que la estimación no se vuelva ruidosa justo en los bordes.
+ */
+export function localRate(ts, n = ts?.length ?? 0) {
+  const out = new Float64Array(n)
+  if (n < 2 || !(ts[n - 1] - ts[0] > 0)) return out
+
+  for (let i = 0; i < n; i += 1) {
+    let j0 = i - RATE_K
+    let j1 = i + RATE_K
+    if (j0 < 0) {
+      j1 -= j0 // desplaza la ventana hacia dentro, no la encoge
+      j0 = 0
+    }
+    if (j1 > n - 1) {
+      j0 -= j1 - (n - 1)
+      j1 = n - 1
+    }
+    if (j0 < 0) j0 = 0
+
+    let span = ts[j1] - ts[j0]
+    for (let w = 0; span <= 0 && w < RATE_MAX_WIDEN && (j0 > 0 || j1 < n - 1); w += 1) {
+      if (j0 > 0) j0 -= 1
+      if (j1 < n - 1) j1 += 1
+      span = ts[j1] - ts[j0]
+    }
+    out[i] = span > 0 ? (j1 - j0) / span : 0
+  }
+  return out
+}
 
 const SHANNON_BINS = 64
 const shannonCounts = new Int32Array(SHANNON_BINS)
