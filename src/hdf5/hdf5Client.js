@@ -53,6 +53,8 @@ export const hdf5 = {
 
   readTimestamps: (test, path) => call('readTimestamps', { test, path }),
   experimentT0: (test) => call('experimentT0', { test }),
+  // Duración y tamaño de un experimento, para el explorador.
+  testStats: (test) => call('testStats', { test }),
 
   // --- Métricas -------------------------------------------------------------
   // Sólo lectura: las calcula scripts/compute_metrics.py antes de arrancar.

@@ -187,6 +187,45 @@ function listTestChildren(testName) {
   return { items }
 }
 
+// Tamaño LÓGICO de un grupo: lo que ocupan sus datos descomprimidos, no lo que
+// el experimento ocupa en el archivo. El HDF5 va comprimido y por chunks, y
+// h5wasm no expone el tamaño almacenado; además lo que interesa al elegir un
+// experimento es cuántos datos trae, que es esto.
+//
+// `metadata.size` son los bytes de un elemento y `total_size` cuántos hay — la
+// misma pareja con la que h5wasm reserva los búferes al leer.
+function groupBytes(path) {
+  let total = 0
+  const walk = (p) => {
+    const o = h5file.get(p)
+    if (!o) return
+    if (o instanceof h5wasm.Group) {
+      for (const k of o.keys()) walk(`${p}/${k}`)
+    } else if (o instanceof h5wasm.Dataset) {
+      const m = o.metadata
+      if (m) total += (m.size || 0) * (m.total_size || 0)
+    }
+  }
+  walk(path)
+  return total
+}
+
+// Duración y tamaño de un experimento, para el explorador.
+//
+// Va en una llamada aparte y no dentro de `listTests` a propósito: el árbol
+// tiene que aparecer en cuanto se abre el archivo, y esto recorre datasets sobre
+// un VFS perezoso. La duración reutiliza `experimentT0`, que en chunks-v2 sólo
+// sondea el primer y el último chunk en vez de recorrerlos todos.
+function testStats(testName) {
+  let durationS = null
+  try {
+    durationS = experimentT0(testName).durationS
+  } catch (err) {
+    durationS = null // sin timestamps: se muestra el tamaño y nada más
+  }
+  return { test: testName, durationS, bytes: groupBytes(testName) }
+}
+
 function readSignalData(testName, path, row = 0, datasetName = 'data') {
   const fullPath = datasetName ? `${testName}/${path}/${datasetName}` : `${testName}/${path}`
   const dset = h5file.get(fullPath)
@@ -533,6 +572,7 @@ const handlers = {
   metricsPlan: (p) => metricsEngine().plan(h5file, p.sidecarBytes),
   readTimestamps: (p) => readTimestamps(p.test, p.path),
   experimentT0: (p) => experimentT0(p.test),
+  testStats: (p) => testStats(p.test),
   readMetric: (p) => {
     const r = metricsEngine().readMetric(p)
     return { ...r, transfer: [r.values.buffer] }

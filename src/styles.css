@@ -474,6 +474,71 @@ body {
   color: var(--warn);
 }
 
+/* Duración y tamaño del experimento. Van juntos y a la derecha del nombre, con
+   un ancho mínimo para que las cifras queden en columna entre filas en vez de
+   bailar según lo largo que sea cada número. */
+.ds-stats {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex: none;
+}
+
+.ds-stats .ds-count {
+  min-width: 52px;
+  text-align: right;
+}
+
+.ds-size {
+  color: var(--muted);
+  opacity: 0.85;
+}
+
+/* Ocultar el experimento de la sesión. Aparece al pasar por la fila para no
+   convertir el árbol en una columna de aspas, pero queda visible en cuanto
+   recibe el foco por teclado. */
+.ds-hide {
+  flex: none;
+  background: none;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 11px;
+  line-height: 1;
+  padding: 3px 5px;
+  border-radius: 4px;
+  opacity: 0;
+}
+
+.ds-row:hover .ds-hide,
+.ds-hide:focus-visible {
+  opacity: 1;
+}
+
+.ds-hide:hover {
+  color: #fff;
+  background: var(--danger);
+}
+
+.ds-restore {
+  flex: none;
+  width: 100%;
+  background: none;
+  border: none;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-align: left;
+  padding: 6px 10px;
+  cursor: pointer;
+}
+
+.ds-restore:hover {
+  color: var(--text);
+  background: var(--panel-2);
+}
+
 .ds-caret {
   display: inline-block;
   width: 10px;

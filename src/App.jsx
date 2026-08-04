@@ -127,6 +127,22 @@ export default function App() {
   // tarjetas. Guarda índices de señal, no posiciones dibujadas, así que
   // sobrevive a cambiar de métrica o de par de ejes.
   const [excluded, setExcluded] = useState({})
+
+  // Duración y tamaño por experimento, para el explorador: { <test>: {...} }.
+  // Se rellenan en segundo plano tras abrir el archivo.
+  const [testStats, setTestStats] = useState({})
+
+  // Experimentos ocultados EN ESTA SESIÓN. Es un filtro de la lista y nada más:
+  // el HDF5 se abre en sólo lectura y no se toca nunca. Por eso se puede
+  // deshacer, y por eso las tarjetas ya abiertas de un experimento oculto siguen
+  // vivas — ocultar es dejar de verlo en el árbol, no tirar trabajo hecho.
+  const [hiddenTests, setHiddenTests] = useState(() => new Set())
+
+  const hideTest = useCallback((name) => {
+    setHiddenTests((prev) => new Set(prev).add(name))
+  }, [])
+
+  const restoreTests = useCallback(() => setHiddenTests(new Set()), [])
   const selectionRef = useRef(new Map()) // cardId -> Map(curve -> índices)
 
   const hdfInputRef = useRef(null)
@@ -512,6 +528,36 @@ export default function App() {
   // en vez de por dependencia (evita el TDZ al evaluar el array en el render).
   const ensureMetricsRef = useRef(ensureMetrics)
   ensureMetricsRef.current = ensureMetrics
+
+  // Duración y tamaño de cada experimento, de uno en uno y en segundo plano.
+  //
+  // Secuencial y no en paralelo: recorre datasets sobre el VFS perezoso, que
+  // sirve bloques del archivo bajo demanda; lanzarlas todas a la vez se pelearía
+  // por la caché de bloques y dejaría al worker sin atender las lecturas que sí
+  // está esperando el usuario. Así el árbol aparece al instante y las cifras van
+  // apareciendo detrás.
+  useEffect(() => {
+    if (!source) {
+      setTestStats({})
+      return undefined
+    }
+    let cancelled = false
+    ;(async () => {
+      for (const t of source.tests) {
+        if (cancelled) return
+        try {
+          const s = await hdf5.testStats(t.name)
+          if (cancelled) return
+          setTestStats((prev) => ({ ...prev, [t.name]: s }))
+        } catch (err) {
+          // Un experimento ilegible no debe cortar la lista: se queda sin cifras.
+        }
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [source])
 
   const updateSourceGeom = useCallback((patch) => {
     setSource((s) => (s ? { ...s, geom: { ...s.geom, ...patch } } : s))
@@ -1296,6 +1342,10 @@ export default function App() {
             onFocus={focusSource}
             plottedTests={plottedTests}
             editedGroups={editedGroups}
+            testStats={testStats}
+            hiddenTests={hiddenTests}
+            onHideTest={hideTest}
+            onRestoreTests={restoreTests}
           />
         )}
       </Canvas>

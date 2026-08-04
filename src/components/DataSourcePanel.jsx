@@ -48,6 +48,17 @@ function formatDuration(seconds) {
   return `${s}s`
 }
 
+// Tamaño legible. Se corta en GB a propósito: son los órdenes de magnitud con
+// los que se trabaja aquí, y un experimento de 2.200 MB se compara peor con otro
+// de 486 MB que 2,20 GB con 0,49 GB.
+function formatSize(bytes) {
+  if (bytes == null || !Number.isFinite(bytes)) return null
+  if (bytes >= 1e9) return `${(bytes / 1e9).toFixed(2)} GB`
+  if (bytes >= 1e6) return `${(bytes / 1e6).toFixed(0)} MB`
+  if (bytes >= 1e3) return `${(bytes / 1e3).toFixed(0)} KB`
+  return `${bytes} B`
+}
+
 export default function DataSourcePanel({
   source,
   geom,
@@ -56,8 +67,13 @@ export default function DataSourcePanel({
   onFocus,
   plottedTests = new Set(),
   editedGroups = new Map(),
+  testStats = {},
+  hiddenTests = new Set(),
+  onHideTest,
+  onRestoreTests,
 }) {
   const scale = useContext(CanvasViewContext)
+  const visible = source.tests.filter((t) => !hiddenTests.has(t.name))
 
   return (
     <Rnd
@@ -89,7 +105,7 @@ export default function DataSourcePanel({
             {source.fileName}
           </span>
           <span className="card-meta">
-            {source.tests.length} tests
+            {visible.length} tests
             {plottedTests.size > 0 && ` · ${plottedTests.size} on canvas`}
           </span>
           <button
@@ -102,21 +118,39 @@ export default function DataSourcePanel({
           </button>
         </div>
         <div className="ds-tree">
-          {source.tests.map((t) => (
+          {visible.map((t) => (
             <TestNode
               key={t.name}
               test={t}
               plotted={plottedTests.has(t.name)}
               editedGroups={editedGroups}
+              stats={testStats[t.name]}
+              onHide={onHideTest}
             />
           ))}
+          {visible.length === 0 && (
+            <div className="ds-hint">every experiment is hidden</div>
+          )}
         </div>
+        {/* Ocultar es reversible dentro de la sesión, y tiene que parecerlo: sin
+            esta fila, esconder un experimento sería irrecuperable sin volver a
+            abrir el archivo. */}
+        {hiddenTests.size > 0 && (
+          <button
+            className="ds-restore"
+            onMouseDown={(e) => e.stopPropagation()}
+            onClick={onRestoreTests}
+            title="Bring back every experiment hidden in this session"
+          >
+            ↺ {hiddenTests.size} hidden · restore
+          </button>
+        )}
       </div>
     </Rnd>
   )
 }
 
-function TestNode({ test, plotted = false, editedGroups = new Map() }) {
+function TestNode({ test, plotted = false, editedGroups = new Map(), stats, onHide }) {
   const [open, setOpen] = useState(false)
   const [children, setChildren] = useState(null)
   const [loading, setLoading] = useState(false)
@@ -137,6 +171,11 @@ function TestNode({ test, plotted = false, editedGroups = new Map() }) {
 
   const shortDate = test.date.replace('Test - ', '').replace(/Z$/, '')
 
+  // Llegan en segundo plano tras abrir el archivo, así que hasta entonces la
+  // fila se dibuja sin ellas en vez de esperarlas.
+  const duration = formatDuration(stats?.durationS)
+  const size = formatSize(stats?.bytes)
+
   // Cuántas señales lleva descartadas este experimento en total. El árbol nace
   // plegado, así que sin esto el aviso del grupo quedaría escondido justo
   // cuando importa: al volver a un experimento que ya se tocó.
@@ -147,10 +186,11 @@ function TestNode({ test, plotted = false, editedGroups = new Map() }) {
 
   return (
     <div className="ds-node">
-      {/* Arrastrar el experimento entero genera los tres gráficos alineados */}
-      <button
+      {/* La fila es arrastrable y además despliega, así que el botón de plegar va
+          dentro: un <button> no puede anidar otro, y el de ocultar tiene que ser
+          uno de verdad para responder al teclado. */}
+      <div
         className={`ds-row ds-test${plotted ? ' ds-plotted' : ''}`}
-        onClick={toggle}
         draggable
         onDragStart={(e) => {
           e.dataTransfer.effectAllowed = 'copy'
@@ -161,15 +201,33 @@ function TestNode({ test, plotted = false, editedGroups = new Map() }) {
         }}
         title="Drag to the canvas for the full experiment overview"
       >
-        <Caret open={open} />
-        <span className="ds-label" title={test.name}>
-          {shortDate}
-        </span>
-        {editedTotal > 0 && <EditedMark count={editedTotal} scope="this experiment" />}
-        {plotted && (
-          <span className="ds-plotted-dot" title="Plotted on the canvas" aria-label="plotted" />
-        )}
-      </button>
+        <button className="ds-toggle" onClick={toggle}>
+          <Caret open={open} />
+          <span className="ds-label" title={test.name}>
+            {shortDate}
+          </span>
+          <span className="ds-stats">
+            {duration && <span className="ds-count">{duration}</span>}
+            {size && <span className="ds-count ds-size">{size}</span>}
+          </span>
+          {editedTotal > 0 && <EditedMark count={editedTotal} scope="this experiment" />}
+          {plotted && (
+            <span className="ds-plotted-dot" title="Plotted on the canvas" aria-label="plotted" />
+          )}
+        </button>
+        <button
+          className="ds-hide"
+          onMouseDown={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            e.stopPropagation()
+            onHide?.(test.name)
+          }}
+          title="Hide from this session — the file is never modified, and it can be restored"
+          aria-label={`Hide ${shortDate} from this session`}
+        >
+          ✕
+        </button>
+      </div>
       {open && (
         <div className="ds-children">
           {loading && <div className="ds-hint">loading structure…</div>}
