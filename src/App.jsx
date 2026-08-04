@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Canvas from './components/Canvas.jsx'
 import Menu from './components/Menu.jsx'
-import ChartCard, { PALETTE } from './components/ChartCard.jsx'
+import ChartCard, { PALETTE, spunColor } from './components/ChartCard.jsx'
 import DataSourcePanel, { groupLabelFor } from './components/DataSourcePanel.jsx'
-import ThemeToggle from './components/ThemeToggle.jsx'
 import { hdf5 } from './hdf5/hdf5Client.js'
 import { fetchSidecar, sidecarName } from './hdf5/metricsStore.js'
 import { compute } from './compute/computeClient.js'
 import { METRICS, METRIC_KEYS_12 } from './compute/metrics.js'
+import { DEFAULT_SMOOTHING } from './compute/trend.js'
 import { opsFor } from './compute/operations.js'
 import {
   deleteDataset,
@@ -20,6 +20,27 @@ import { GRID, snap } from './constants.js'
 // True when point (cx, cy) falls inside card c's rectangle.
 const contains = (c, cx, cy) =>
   cx >= c.x && cx <= c.x + c.width && cy >= c.y && cy <= c.y + c.height
+
+// Especie de un gráfico: qué clase de cosa dibuja. Sólo se superponen dos
+// gráficos de la MISMA especie.
+//
+// El dominio no bastaba. Una forma de onda, una métrica contra el tiempo y la
+// temperatura ambiental son las tres `domain: 'time'`, y fusionarlas daba una
+// tarjeta con un eje Y que no significaba nada para dos de sus series: microsegundos
+// de una señal cruda contra minutos de experimento en el mismo eje X, o voltios
+// de pico contra grados. La especie es lo que de verdad comparten dos series que
+// tiene sentido mirar juntas.
+//
+//   signal   forma de onda cruda (muestras)
+//   metric   una métrica contra el tiempo del experimento
+//   scatter  métrica contra métrica
+//   env      temperatura / humedad
+//   freq     espectro
+//
+// Es un campo de la tarjeta, no algo que se deduzca: dos tarjetas pueden tener
+// los mismos `domain` y `sensor` y venir de sitios distintos.
+const SPECIES_FALLBACK = 'signal'
+const speciesOf = (card) => card.species || SPECIES_FALLBACK
 
 // Signature of a card's series — changes when a series is added/removed.
 const seriesSig = (series) =>
@@ -34,10 +55,8 @@ const seriesSig = (series) =>
 // Sólo se recolorean las series que chocan, y por orden: la primera conserva su
 // color. Así la humedad sigue siendo azul y la temperatura roja —ahí el color
 // significa algo— y sólo se mueve lo que de verdad era ambiguo.
-// Agotada la paleta, se siguen generando tonos por ángulo áureo: reparte el
-// círculo de color sin repetir por muchas series que se fusionen.
-const spunColor = (n) => `hsl(${Math.round((n * 137.508) % 360)}, 68%, 62%)`
-
+// Agotada la paleta, `spunColor` sigue generando tonos por ángulo áureo: reparte
+// el círculo de color sin repetir por muchas series que se fusionen.
 const recolor = (series) => {
   const used = new Set()
   return series.map((s) => {
@@ -62,10 +81,19 @@ const DEFAULT_METRIC = 'vpp'
 // pulso separa a ojo los grupos que interesa descartar.
 const DEFAULT_SCATTER = { x: 'vpp', y: 'kurtosis' }
 
+// Color de identidad de cada sensor. Sale de PALETTE —los dos primeros tonos,
+// que son los que la validación garantiza separables entre sí— y no del orden en
+// que se dibuje: un UHF es verde-azul esté solo o fusionado con tres series más.
+const SENSOR_COLOR = { uhf: PALETTE[0], ae: PALETTE[1] }
+
+// Ambiental. Aquí el color sí significa algo por convención —frío el agua,
+// caliente la temperatura—, así que se fija por magnitud y no por posición.
+const ENV_COLOR = { humidity: PALETTE[0], temperature: PALETTE[5] }
+
 // Sensores con scatter propio, en orden.
 const SCATTER_SENSORS = [
-  { sensor: 'uhf', label: 'UHF', color: '#5fd68a' },
-  { sensor: 'ae', label: 'AE', color: '#ffcf5f' },
+  { sensor: 'uhf', label: 'UHF', color: SENSOR_COLOR.uhf },
+  { sensor: 'ae', label: 'AE', color: SENSOR_COLOR.ae },
 ]
 
 const exKey = (test, sensor) => `${test}|${sensor}`
@@ -90,7 +118,6 @@ export default function App() {
   const [source, setSource] = useState(null) // { fileName, tests, geom }
   const [opening, setOpening] = useState(false)
   const [error, setError] = useState(null)
-  const [theme, setTheme] = useState('dark')
   const [mergeTargetId, setMergeTargetId] = useState(null) // highlighted while dragging
   const [metrics, setMetrics] = useState(null) // { key, bytes, index, fileName }
 
@@ -107,15 +134,6 @@ export default function App() {
   const cardsRef = useRef(cards) // latest geometry for use inside drag handlers
   cardsRef.current = cards
 
-  useEffect(() => {
-    document.documentElement.setAttribute('data-theme', theme)
-  }, [theme])
-
-  const toggleTheme = useCallback(
-    () => setTheme((t) => (t === 'dark' ? 'light' : 'dark')),
-    [],
-  )
-
   const openMenu = useCallback((pos) => setMenu({ kind: 'canvas', ...pos }), [])
   const closeMenu = useCallback(() => setMenu(null), [])
 
@@ -127,13 +145,21 @@ export default function App() {
   }, [])
 
   // --- Card creation --------------------------------------------------------
-  const addCard = useCallback(({ title, series, at, domain = 'time', source = null }) => {
+  const addCard = useCallback(({
+    title,
+    series,
+    at,
+    domain = 'time',
+    source = null,
+    species = SPECIES_FALLBACK,
+  }) => {
     setCards((prev) => [
       ...prev,
       {
         id: nextCardId(),
         title,
         domain,
+        species,
         series,
         source, // { cardId, op, sig } for derived cards (e.g. an FFT)
         x: snap(at.x),
@@ -223,10 +249,16 @@ export default function App() {
     if (!dragged) return null
     const cx = pos.x + dragged.width / 2
     const cy = pos.y + dragged.height / 2
-    // Only merge cards of the SAME domain (a spectrum and a time signal have
-    // different axes and must not fuse).
+    // Sólo se fusionan gráficos de la misma especie y del mismo dominio: un
+    // espectro y una señal temporal no comparten ejes, y una forma de onda y una
+    // métrica tampoco aunque las dos vayan contra el tiempo.
+    const species = speciesOf(dragged)
     const targets = list.filter(
-      (c) => c.id !== id && c.domain === dragged.domain && contains(c, cx, cy),
+      (c) =>
+        c.id !== id &&
+        c.domain === dragged.domain &&
+        speciesOf(c) === species &&
+        contains(c, cx, cy),
     )
     if (targets.length === 0) return null
     return targets.reduce((a, b) => ((b.z || 0) > (a.z || 0) ? b : a)).id
@@ -294,9 +326,13 @@ export default function App() {
     setCards((prev) => {
       const card = prev.find((c) => c.id === id)
       if (!card || card.series.length < 2) return prev
+      // Dominio y especie se heredan: separar una fusión da las mismas tarjetas
+      // que entraron, y tienen que poder volver a juntarse.
       const fanned = card.series.map((s, i) => ({
         id: nextCardId(),
         title: s.name,
+        domain: card.domain,
+        species: card.species,
         series: [s],
         x: card.x + i * GRID,
         y: card.y + i * GRID,
@@ -343,6 +379,7 @@ export default function App() {
           title: `FFT · ${card.title}`,
           series,
           domain: 'freq',
+          species: 'freq',
           at: { x: card.x + 2 * GRID, y: card.y + 2 * GRID },
           source: { cardId: card.id, op: 'fft', sig: seriesSig(card.series) },
         })
@@ -446,8 +483,8 @@ export default function App() {
 
     if (!bytes) {
       setError(
-        `Sin métricas para ${file.name}: falta ${sidecarName(file.name)}. ` +
-        'Corre `npm run metrics` y vuelve a abrir el archivo.',
+        `No metrics for ${file.name}: ${sidecarName(file.name)} is missing. ` +
+        'Run `npm run metrics` and open the file again.',
       )
       return
     }
@@ -462,12 +499,12 @@ export default function App() {
       if (missing.length > 0) {
         const names = missing.slice(0, 3).map((g) => `${g.test}/${g.sensor}`).join(', ')
         setError(
-          `Faltan métricas en ${missing.length} grupo(s) (${names}` +
-          `${missing.length > 3 ? ', …' : ''}). Corre \`npm run metrics\`.`,
+          `Missing metrics in ${missing.length} group(s) (${names}` +
+          `${missing.length > 3 ? ', …' : ''}). Run \`npm run metrics\`.`,
         )
       }
     } catch (err) {
-      setError(`Métricas: ${err?.message || err}`)
+      setError(`Metrics: ${err?.message || err}`)
     }
   }, [])
 
@@ -518,8 +555,8 @@ export default function App() {
     })
 
     return [
-      { datasetId: id, xCol: XCOL, yCol: hum, name: hum, color: '#4f9cff' },
-      { datasetId: id, xCol: XCOL, yCol: tmp, name: tmp, color: '#ff5f7a', axis: 'y2' },
+      { datasetId: id, xCol: XCOL, yCol: hum, name: hum, color: ENV_COLOR.humidity },
+      { datasetId: id, xCol: XCOL, yCol: tmp, name: tmp, color: ENV_COLOR.temperature, axis: 'y2' },
     ]
   }, [])
 
@@ -533,7 +570,7 @@ export default function App() {
   // —el frontend no computa métricas— y el eje X de los timestamps del master,
   // que el sidecar no guarda.
   const buildMetricChart = useCallback(async (test, sensor, t0, color, metricKey) => {
-    if (!metrics?.bytes) throw new Error('sin métricas: ejecuta npm run metrics')
+    if (!metrics?.bytes) throw new Error('no metrics: run npm run metrics')
 
     const [m, ts] = await Promise.all([
       hdf5.readMetric(test, sensor, metricKey, metrics.bytes),
@@ -580,7 +617,7 @@ export default function App() {
   // rectángulo o lazo selecciona señales, y descartarlas las quita de todas las
   // métricas de ese sensor.
   const buildScatterChart = useCallback(async (test, sensor, xMetric, yMetric, color) => {
-    if (!metrics?.bytes) throw new Error('sin métricas: ejecuta npm run metrics')
+    if (!metrics?.bytes) throw new Error('no metrics: run npm run metrics')
 
     const [mx, my] = await Promise.all([
       hdf5.readMetric(test, sensor, xMetric, metrics.bytes),
@@ -622,23 +659,26 @@ export default function App() {
     {
       key: 'humidity',
       label: 'Temp/Hum Data',
+      species: 'env',
       build: (t, t0) => buildEnvChart(t, t0),
     },
     {
       key: 'uhf',
       label: 'UHF Data',
       sensor: 'uhf',
-      color: '#5fd68a',
+      species: 'metric',
+      color: SENSOR_COLOR.uhf,
       build: (t, t0, metricKey = DEFAULT_METRIC) =>
-        buildMetricChart(t, 'uhf', t0, '#5fd68a', metricKey),
+        buildMetricChart(t, 'uhf', t0, SENSOR_COLOR.uhf, metricKey),
     },
     {
       key: 'ae',
       label: 'AE Data',
       sensor: 'ae',
-      color: '#ffcf5f',
+      species: 'metric',
+      color: SENSOR_COLOR.ae,
       build: (t, t0, metricKey = DEFAULT_METRIC) =>
-        buildMetricChart(t, 'ae', t0, '#ffcf5f', metricKey),
+        buildMetricChart(t, 'ae', t0, SENSOR_COLOR.ae, metricKey),
     },
   ], [buildEnvChart, buildMetricChart])
 
@@ -671,6 +711,7 @@ export default function App() {
         id: ids[i],
         title: `${spec.label} · ${shortDate}`,
         domain: 'time',
+        species: spec.species,
         series: [],
         source: null,
         loading: true,
@@ -693,13 +734,14 @@ export default function App() {
       // con los tres apilados.
       ...SCATTER_SENSORS.map((s, i) => ({
         id: scatterIds[i],
-        title: `${s.label} · dispersión · ${shortDate}`,
+        title: `${s.label} · scatter · ${shortDate}`,
         domain: 'metric',
+        species: 'scatter',
         kind: 'metricScatter',
         series: [],
         source: null,
         loading: true,
-        loadingLabel: `${s.label} dispersión…`,
+        loadingLabel: `${s.label} scatter…`,
         experimentId, // satélite: se cierra con el bloque, pero no al revés
         test,
         sensor: s.sensor,
@@ -743,7 +785,7 @@ export default function App() {
   // bloque, con el mismo origen de tiempo y el mismo rango, pero solo.
   const dropSensorChart = useCallback(async (test, groupName, at) => {
     const spec = chartSpecs.find((c) => c.key === groupName)
-    if (!spec) throw new Error(`Sin gráfico definido para "${groupName}"`)
+    if (!spec) throw new Error(`No chart defined for "${groupName}"`)
 
     const shortDate = shortLabel(test)
     const id = nextCardId()
@@ -754,6 +796,7 @@ export default function App() {
         id,
         title: `${spec.label} · ${shortDate}`,
         domain: 'time',
+        species: spec.species,
         series: [],
         source: null,
         loading: true,
@@ -837,6 +880,25 @@ export default function App() {
     }
   }, [buildScatterChart, buildMetricChart, patchCard])
 
+  // --- Tendencia ---------------------------------------------------------------
+  // Sólo el interruptor y el nivel de suavizado viven aquí: la curva se calcula
+  // en la tarjeta, a partir de los datos ya enmascarados y del tramo visible, y
+  // no se guarda en ningún sitio. Es barata de rehacer y depende del zoom, así
+  // que almacenarla sólo daría ocasión de que quedara desfasada.
+  const toggleTrend = useCallback((cardId) => {
+    setCards((prev) => prev.map((c) => (
+      c.id === cardId
+        ? { ...c, trend: c.trend ? null : { smoothing: DEFAULT_SMOOTHING } }
+        : c
+    )))
+  }, [])
+
+  const setSmoothing = useCallback((cardId, smoothing) => {
+    setCards((prev) => prev.map((c) => (
+      c.id === cardId && c.trend ? { ...c, trend: { ...c.trend, smoothing } } : c
+    )))
+  }, [])
+
   // --- Descarte de señales ----------------------------------------------------
   // La selección es efímera y no pinta nada de React: se guarda en una ref para
   // que arrastrar el lazo no re-renderice el lienzo entero en cada movimiento.
@@ -851,7 +913,7 @@ export default function App() {
     const card = cardsRef.current.find((c) => c.id === cardId)
     const byCurve = selectionRef.current.get(cardId)
     if (!card || !byCurve || byCurve.size === 0) {
-      setError('Selecciona puntos con el rectángulo o el lazo antes de quitarlos.')
+      setError('Select points with the box or lasso tool before dropping them.')
       return
     }
 
@@ -917,7 +979,7 @@ export default function App() {
     if (!test || !sensor) return
 
     const sensorLabel = sensor.toUpperCase()
-    const title = `${sensorLabel} · señal #${index + 1}`
+    const title = `${sensorLabel} · signal #${index + 1}`
     const id = nextCardId()
 
     // Cascada desde la tarjeta de origen. Cuenta las que ya salieron de ella:
@@ -932,6 +994,7 @@ export default function App() {
         id,
         title,
         domain: 'time',
+        species: 'signal',
         series: [],
         source: null,
         loading: true,
@@ -948,7 +1011,7 @@ export default function App() {
 
     try {
       const res = await hdf5.readSignalAt(test, sensor, index)
-      const xcol = 't (muestras)'
+      const xcol = 't (samples)'
       const x = new Float64Array(res.nSamples)
       for (let i = 0; i < res.nSamples; i += 1) x[i] = i * res.dt
       const dsId = nextDatasetId()
@@ -1011,6 +1074,7 @@ export default function App() {
           addCard({
             title: `${groupLabelFor(path)} series (${summaryRes.nSignals} signals) · ${test}`,
             series: [{ datasetId: id, xCol: xcol, yCol: ycol, name: ycol }],
+            species: 'signal',
             at: pos,
           })
           return
@@ -1051,6 +1115,7 @@ export default function App() {
           addCard({
             title: `${m.label} vs Time · ${groupLabelFor(path)} (${test})`,
             series: [{ datasetId: id, xCol: xcol, yCol: ycol, name: ycol }],
+            species: 'metric',
             at: pos,
           })
           return
@@ -1093,13 +1158,14 @@ export default function App() {
           addCard({
             title: cardTitle,
             series: [{ datasetId: id, xCol: xcol, yCol: ycol, name: ycol }],
+            species: 'env',
             at: pos,
           })
           return
         }
 
         const res = await hdf5.readSignal(test, path, row, datasetName)
-        const xcol = 't (muestras)'
+        const xcol = 't (samples)'
         const ycol = label || `${path} · sig ${row}`
         const x = new Float64Array(res.nSamples)
         for (let i = 0; i < res.nSamples; i += 1) x[i] = i * res.dt
@@ -1179,7 +1245,6 @@ export default function App() {
           <ChartCard
             key={card.id}
             card={card}
-            theme={theme}
             isMergeTarget={card.id === mergeTargetId}
             masks={masks}
             // Firma estable: el redibujado depende de qué hay descartado, no de
@@ -1200,6 +1265,8 @@ export default function App() {
             onContextMenu={(pos) => openCardMenu(card.id, pos)}
             metricKeys={METRIC_KEYS_12}
             onMetricChange={(axis, key) => changeMetric(card.id, axis, key)}
+            onToggleTrend={() => toggleTrend(card.id)}
+            onSmoothingChange={(value) => setSmoothing(card.id, value)}
             onPointClick={(index, curve) => openSignalAt(card.id, index, curve)}
           />
           )
@@ -1216,8 +1283,6 @@ export default function App() {
           />
         )}
       </Canvas>
-
-      <ThemeToggle theme={theme} onToggle={toggleTheme} />
 
       {empty && !menu && !opening && (
         <div className="hint" aria-hidden="true">

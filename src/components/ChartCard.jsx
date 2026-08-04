@@ -2,6 +2,7 @@ import { useContext, useEffect, useRef } from 'react'
 import { Rnd } from 'react-rnd'
 import Plotly from 'plotly.js-dist-min'
 import { METRICS } from '../compute/metrics.js'
+import { DEFAULT_SMOOTHING, SMOOTHING, trendCurve, trendParams } from '../compute/trend.js'
 import { getDataset } from '../state/datasetStore.js'
 import { publishAxis, subscribeAxis } from '../state/axisSync.js'
 import { CanvasViewContext } from './Canvas.jsx'
@@ -14,19 +15,71 @@ import { snap } from '../constants.js'
 // A card holds a list of `series`, each { datasetId, xCol, yCol, name }. This is
 // what makes cards mergeable: dropping one card on another concatenates series.
 
+// Tonos de serie, en orden fijo. Se asignan por posición y NUNCA se ciclan: el
+// color identifica a la serie, así que el 9.º no se genera girando el círculo.
+//
+// El orden no es decorativo. Validado sobre la superficie del gráfico (--panel,
+// #0a0a0c) con el validador de paleta: los ocho pasan separación para daltonismo
+// entre contiguos, y los CUATRO PRIMEROS la pasan además entre todos los pares.
+// Eso es lo que importa aquí, porque un gráfico de métrica es una nube de puntos
+// donde cualquier par de series puede solaparse, no sólo las vecinas de la
+// leyenda. Reordenar esta lista invalida esa garantía.
 export const PALETTE = [
-  '#4f9cff', '#ff7ac6', '#5fd68a', '#ffcf5f',
-  '#b98cff', '#ff8f5f', '#4fd6d6', '#ff5f7a',
+  '#3987e5', '#c98500', '#d55181', '#008300',
+  '#9085e9', '#d95926', '#199e70', '#e66767',
 ]
 
-const THEME = {
-  dark: {
-    paper: '#12151c', font: '#c7ccd6', grid: '#232833', zero: '#2c3240',
-  },
-  light: {
-    paper: '#ffffff', font: '#3a4250', grid: '#e6e9ef', zero: '#cdd3dc',
-  },
+// Superficie y tinta del área de trazado, en sintonía con los tokens del CSS.
+// Plotly no lee variables CSS, así que los valores se repiten aquí a mano.
+const PLOT_THEME = { paper: '#0a0a0c', font: '#c9c9d2' }
+
+// Trazas que aporta la tendencia por cada serie: borde inferior, borde superior
+// (que rellena hasta el anterior) y la curva. El relleno de Plotly va contra la
+// traza previa, así que las dos de la banda tienen que ir seguidas y en ese
+// orden.
+const TREND_TRACES = 3
+
+const withAlpha = (hex, alpha) => {
+  const h = hex.replace('#', '')
+  const n = parseInt(h.length === 3 ? h.replace(/./g, (c) => c + c) : h, 16)
+  return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${alpha})`
 }
+
+// Opacidad de la nube cuando hay tendencia encima. Los puntos siguen ahí —se
+// pueden clicar y seleccionar para descartar—, sólo ceden el primer plano.
+const DIMMED = 0.25
+
+// OKLCH → hex. Es el espacio en el que están definidos los tonos de PALETTE y
+// en el que se mide la separación entre ellos; generar un color de reserva en
+// HSL daba luminosidades que variaban con el tono y unos salían apagados sobre
+// el negro y otros deslumbraban.
+function oklchHex(L, C, hueDeg) {
+  const h = (hueDeg * Math.PI) / 180
+  const a = C * Math.cos(h)
+  const b = C * Math.sin(h)
+  const l = (L + 0.3963377774 * a + 0.2158037573 * b) ** 3
+  const m = (L - 0.1055613458 * a - 0.0638541728 * b) ** 3
+  const s = (L - 0.0894841775 * a - 1.2914855480 * b) ** 3
+  const rgb = [
+    4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
+    -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+    -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s,
+  ]
+  return `#${rgb.map((v) => {
+    const c = Math.max(0, Math.min(1, v))
+    const srgb = c <= 0.0031308 ? 12.92 * c : 1.055 * c ** (1 / 2.4) - 0.055
+    return Math.round(srgb * 255).toString(16).padStart(2, '0')
+  }).join('')}`
+}
+
+// Tono de reserva para la serie n.ª más allá de PALETTE.
+//
+// Es una red de seguridad, no un noveno color de la paleta: se llega aquí sólo
+// fusionando más de ocho series en una tarjeta, y a esa altura la identidad ya la
+// lleva la leyenda. El ángulo áureo reparte el círculo sin repetir, y la
+// luminosidad y la croma quedan fijas dentro de la banda con la que se validó
+// PALETTE, así que un tono generado no desentona ni se pierde sobre el negro.
+export const spunColor = (n) => oklchHex(0.62, 0.15, (n * 137.508) % 360)
 
 const CONFIG = { displaylogo: false, responsive: false, scrollZoom: true }
 
@@ -43,8 +96,10 @@ const CONFIG = { displaylogo: false, responsive: false, scrollZoom: true }
 // hay un número acotado (cuatro por experimento arrastrado).
 const GL_THRESHOLD = 20000
 
-// El scatter nace en modo selección, que es su gesto principal. El modebar se
-// deja tal cual —para scattergl ya trae rectángulo, lazo, zoom y pan—: añadir
+// Gráficos desde los que se puede descartar. El modebar se fija visible en vez
+// de dejarlo aparecer al pasar por encima: el rectángulo y el lazo son la única
+// forma de seleccionar, y escondidos no se encuentran. Se deja tal cual por lo
+// demás —para scatter y scattergl ya trae rectángulo, lazo, zoom y pan—: añadir
 // botones a mano corre el riesgo de duplicar los que ya venían.
 const SELECT_CONFIG = { ...CONFIG, displayModeBar: true }
 
@@ -159,8 +214,8 @@ function seriesSignature(series) {
 // que el área de trazado es predecible y se puede igualar entre gráficos.
 const Y2_MARGIN = 56
 
-function baseLayout(theme, xTitle, card) {
-  const t = THEME[theme] || THEME.dark
+function baseLayout(xTitle, card) {
+  const t = PLOT_THEME
   const hasY2 = card.series.some((s) => s.axis === 'y2')
 
   // Alineación entre gráficos: el margen determina dónde empieza y acaba el
@@ -231,8 +286,8 @@ function MetricSelect({ axis, value, keys, onChange }) {
       value={value || ''}
       onMouseDown={(e) => e.stopPropagation()}
       onChange={(e) => onChange?.(axis, e.target.value)}
-      title={`Métrica del eje ${axis.toUpperCase()}`}
-      aria-label={`Métrica del eje ${axis.toUpperCase()}`}
+      title={`${axis.toUpperCase()} axis metric`}
+      aria-label={`${axis.toUpperCase()} axis metric`}
     >
       {keys.map((key) => (
         <option key={key} value={key}>
@@ -246,7 +301,6 @@ function MetricSelect({ axis, value, keys, onChange }) {
 
 export default function ChartCard({
   card,
-  theme,
   isMergeTarget,
   onChange,
   onDragMove,
@@ -259,6 +313,8 @@ export default function ChartCard({
   masks = [],
   maskSig = '',
   onMetricChange,
+  onToggleTrend,
+  onSmoothingChange,
   onPointClick,
   onSelectPoints,
   onDropSelection,
@@ -284,10 +340,18 @@ export default function ChartCard({
   masksRef.current = masks
   const keepRef = useRef([]) // por traza: índices originales de lo dibujado
   const fullRef = useRef([]) // por traza: datos sin decimar, para re-decimar al hacer zoom
+  const maskedRef = useRef([]) // por serie: datos enmascarados sin decimar, para la tendencia
+  const dataCountRef = useRef(0) // cuántas trazas son datos; de ahí en adelante, tendencia
 
   // Índice original de un punto: sin filtrado es él mismo; con filtrado, el que
   // dice `keep`.
+  //
+  // Devuelve null para las trazas de tendencia, que van detrás de las de datos.
+  // Sin ese corte, un clic o un lazo que rozara la curva se leería como si fuera
+  // un punto de la serie: abriría una señal que no es y descartaría la
+  // equivocada.
   const originalIndex = (curve, i) => {
+    if (curve >= dataCountRef.current) return null
     const keep = keepRef.current[curve]
     if (!keep) return i
     return i >= 0 && i < keep.length ? keep[i] : null
@@ -302,8 +366,26 @@ export default function ChartCard({
   // todas las series, cada una contra su propio experimento y sensor.
   const canPickMetric = isMetricChart
 
-  // El scatter métrica-vs-métrica elige las dos, y es desde donde se filtra.
+  // El scatter métrica-vs-métrica elige las dos métricas de sus ejes.
   const isScatter = card.kind === 'metricScatter'
+
+  // Desde dónde se puede descartar. Vale cualquier gráfico indexado por señal,
+  // no sólo el scatter: en la métrica contra el tiempo un punto es también una
+  // señal, y hay recortes —una racha de ruido en un tramo, la cola del ensayo—
+  // que se ven en el tiempo y no en la nube de métrica contra métrica.
+  //
+  // Lo que cambia entre los dos es el gesto por defecto, no la capacidad: el
+  // scatter nace seleccionando, y el de tiempo nace haciendo zoom, que es como
+  // se lee (y va sincronizado con el resto del bloque). En ése hay que coger el
+  // rectángulo del modebar, que por eso queda siempre visible.
+  const canSelect = isMetricChart
+
+  // La tendencia sólo tiene sentido donde el eje X es tiempo: en el scatter
+  // métrica-vs-métrica el X es otra métrica y "suavizar en el tiempo" no
+  // significa nada.
+  const canTrend = card.species === 'metric'
+  const trendOn = canTrend && !!card.trend
+  const smoothing = card.trend?.smoothing || DEFAULT_SMOOTHING
 
   // Initial draw / redraw when the set of series changes (e.g. after a merge).
   useEffect(() => {
@@ -312,9 +394,12 @@ export default function ChartCard({
 
     const keeps = []
     const fulls = []
+    const masked = []
+    const colors = []
     const traces = card.series.map((s, i) => {
       const ds = getDataset(s.datasetId)
       const color = s.color || PALETTE[i % PALETTE.length]
+      colors[i] = color
       const mode = s.mode || 'lines'
       const { x, y, keep } = applyMask(
         ds ? ds.data[s.xCol] : [],
@@ -322,6 +407,9 @@ export default function ChartCard({
         masksRef.current[i],
       )
       keeps[i] = keep
+      // Sin decimar y ya enmascarado: es de aquí de donde come la tendencia, así
+      // que respeta lo descartado y no ve una envolvente recortada.
+      masked[i] = { x, y }
 
       // Sólo líneas: en marcadores cada punto es una señal clicable.
       const decimable = mode === 'lines' && x.length > DECIM_TARGET * 2
@@ -337,24 +425,104 @@ export default function ChartCard({
         x: drawn.x,
         y: drawn.y,
         yaxis: s.axis === 'y2' ? 'y2' : 'y',
+        ...(trendOn ? { opacity: DIMMED } : {}),
         ...(mode.includes('lines') ? { line: { width: 1, color } } : {}),
         ...(mode.includes('markers') ? { marker: { size: 3, color } } : {}),
       }
     })
     keepRef.current = keeps
     fullRef.current = fulls
+    maskedRef.current = masked
+    dataCountRef.current = traces.length
+
+    // --- Tendencia ------------------------------------------------------------
+    // Se añaden SIEMPRE las tres trazas por serie cuando la tendencia está
+    // encendida, aunque una salga vacía: los índices de traza tienen que ser
+    // estables para que el restyle del zoom sepa a quién escribe.
+    if (trendOn) {
+      card.series.forEach((s, i) => {
+        const color = colors[i]
+        const axis = s.axis === 'y2' ? 'y2' : 'y'
+        const shared = {
+          type: 'scatter',
+          mode: 'lines',
+          yaxis: axis,
+          showlegend: false,
+          hoverinfo: 'skip',
+        }
+        traces.push(
+          { ...shared, x: [], y: [], line: { width: 0, color } },
+          {
+            ...shared,
+            x: [],
+            y: [],
+            line: { width: 0, color },
+            fill: 'tonexty',
+            fillcolor: withAlpha(color, 0.16),
+          },
+          { ...shared, x: [], y: [], line: { width: 2, color } },
+        )
+      })
+    }
 
     const xTitle = card.series[0]?.xCol ?? ''
     let unsubscribe = () => {}
     let disposed = false
 
-    // Rectángulo y lazo sólo en el scatter: es el gráfico desde el que se
-    // filtra, y es donde hay un botón para aplicar lo seleccionado.
-    const config = isScatter ? SELECT_CONFIG : CONFIG
-    Plotly.react(el, traces, baseLayout(theme, xTitle, card), config).then(() => {
+    // Span completo de los datos, para cuando el eje está en automático.
+    let fullSpan = [Infinity, -Infinity]
+    for (const m of masked) {
+      if (m.x.length === 0) continue
+      if (m.x[0] < fullSpan[0]) fullSpan[0] = m.x[0]
+      if (m.x[m.x.length - 1] > fullSpan[1]) fullSpan[1] = m.x[m.x.length - 1]
+    }
+    if (!Number.isFinite(fullSpan[0])) fullSpan = [0, 0]
+
+    // Recalcula la tendencia para el tramo visible. Esto es lo que la hace
+    // adaptativa: tau sale del span que se ve, así que al acercarse la curva
+    // deja de promediar lo que ya no está en pantalla y aparece el detalle que
+    // la vista completa no podía mostrar. Son tres pasadas O(n) — unos pocos ms
+    // en el peor caso real—, así que va en el hilo principal sin worker.
+    const applyTrend = (x0, x1) => {
+      if (!trendOn || disposed) return
+      const from = x0 ?? fullSpan[0]
+      const to = x1 ?? fullSpan[1]
+      const params = trendParams(from, to, smoothing)
+      const ys = []
+      const xsOut = []
+      const indices = []
+      masked.forEach((m, i) => {
+        const t = trendCurve(m.x, m.y, params)
+        const base = dataCountRef.current + i * TREND_TRACES
+        const empty = []
+        xsOut.push(t ? t.x : empty, t ? t.x : empty, t ? t.x : empty)
+        ys.push(t ? t.lo : empty, t ? t.hi : empty, t ? t.mid : empty)
+        indices.push(base, base + 1, base + 2)
+      })
+      if (indices.length > 0) Plotly.restyle(el, { x: xsOut, y: ys }, indices)
+    }
+
+    // Modebar fijo donde se puede descartar: es donde hacen falta el rectángulo
+    // y el lazo, y donde la barra de título trae el botón para aplicarlo.
+    const config = canSelect ? SELECT_CONFIG : CONFIG
+    Plotly.react(el, traces, baseLayout(xTitle, card), config).then(() => {
       if (disposed) return
       drawnRef.current = true
       Plotly.Plots.resize(el)
+
+      // Primer trazado de la tendencia: sobre el rango fijado de la tarjeta si
+      // lo hay (los del bloque de experimento lo traen), y si no sobre el span
+      // completo de los datos.
+      applyTrend(card.xRange?.[0], card.xRange?.[1])
+      if (trendOn) {
+        el.on('plotly_relayout', (ev) => {
+          if (!drawnRef.current) return
+          if (ev['xaxis.autorange']) applyTrend(fullSpan[0], fullSpan[1])
+          else if (ev['xaxis.range[0]'] !== undefined) {
+            applyTrend(ev['xaxis.range[0]'], ev['xaxis.range[1]'])
+          }
+        })
+      }
 
       // Clic en un punto => la señal que hay detrás. El índice dibujado se
       // traduce al número de señal en el experimento, que es con el que se
@@ -376,7 +544,7 @@ export default function ChartCard({
         // Rectángulo o lazo. Se acumulan por traza porque una selección puede
         // cruzar series de sensores distintos en una tarjeta fusionada, y cada
         // una se descarta contra su propio sensor.
-        if (isScatter) {
+        if (canSelect) {
           el.on('plotly_selected', (ev) => {
             if (!ev?.points) return
             const byCurve = new Map()
@@ -456,19 +624,7 @@ export default function ChartCard({
       drawnRef.current = false
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sig, card.loading, card.groupId, isMetricChart, isScatter, maskSig])
-
-  // Restyle colors when the theme changes (no full redraw needed).
-  useEffect(() => {
-    const el = plotRef.current
-    if (!el || !drawnRef.current) return
-    const t = THEME[theme] || THEME.dark
-    Plotly.relayout(el, {
-      paper_bgcolor: t.paper,
-      plot_bgcolor: t.paper,
-      'font.color': t.font,
-    })
-  }, [theme])
+  }, [sig, card.loading, card.groupId, isMetricChart, canSelect, maskSig, trendOn, smoothing])
 
   // Keep Plotly filling the container as the card is resized (live).
   useEffect(() => {
@@ -548,22 +704,56 @@ export default function ChartCard({
             />
           )}
 
-          {isScatter && !card.loading && (
+          {canTrend && !card.loading && (
+            <>
+              <button
+                className={`card-trend${trendOn ? ' on' : ''}`}
+                onMouseDown={(e) => e.stopPropagation()}
+                onClick={onToggleTrend}
+                title={
+                  trendOn
+                    ? 'Hide the trend line'
+                    : 'Time-aware EWMA trend, adapts to the visible range'
+                }
+                aria-pressed={trendOn}
+              >
+                ∿ trend
+              </button>
+              {trendOn && (
+                <select
+                  className="card-metric"
+                  value={smoothing}
+                  onMouseDown={(e) => e.stopPropagation()}
+                  onChange={(e) => onSmoothingChange?.(e.target.value)}
+                  title="Trend smoothing"
+                  aria-label="Trend smoothing"
+                >
+                  {Object.entries(SMOOTHING).map(([key, { label }]) => (
+                    <option key={key} value={key}>
+                      {label}
+                    </option>
+                  ))}
+                </select>
+              )}
+            </>
+          )}
+
+          {canSelect && !card.loading && (
             <>
               <button
                 className="card-drop"
                 onMouseDown={(e) => e.stopPropagation()}
                 onClick={onDropSelection}
-                title="Descartar la selección en todas las métricas de este sensor"
+                title="Drop the selected signals from every metric of this sensor"
               >
-                ✂ quitar
+                ✂ drop
               </button>
               <button
                 className="card-reset"
                 onMouseDown={(e) => e.stopPropagation()}
                 onClick={onResetExclusion}
                 disabled={excludedCount === 0}
-                title="Devolver todas las señales descartadas"
+                title="Restore every dropped signal"
               >
                 ↺
               </button>

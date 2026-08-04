@@ -191,7 +191,7 @@ function readSignalData(testName, path, row = 0, datasetName = 'data') {
   const fullPath = datasetName ? `${testName}/${path}/${datasetName}` : `${testName}/${path}`
   const dset = h5file.get(fullPath)
   if (!dset) {
-    throw new Error(`Dataset no encontrado en: ${fullPath}`)
+    throw new Error(`Dataset not found at: ${fullPath}`)
   }
 
   let y
@@ -206,7 +206,7 @@ function readSignalData(testName, path, row = 0, datasetName = 'data') {
     const slab = dset.value
     y = Float32Array.from(slab)
   } else {
-    throw new Error(`Forma de dataset no soportada: ${dset.shape}`)
+    throw new Error(`Unsupported dataset shape: ${dset.shape}`)
   }
 
   return {
@@ -275,7 +275,7 @@ function readTimestamps(testName, path) {
   // chunks-v2: `path` es el sensor ('uhf' | 'ae') o un grupo por chunk.
   const source = CHUNK_SOURCES[path] || path
   const values = concatChunked(testName, source, 'timestamps')
-  if (!values) throw new Error(`Sin timestamps en ${testName}/${path}`)
+  if (!values) throw new Error(`No timestamps in ${testName}/${path}`)
   return { values, n: values.length, transfer: [values.buffer] }
 }
 
@@ -319,9 +319,9 @@ function rowIndex(testName, sensor) {
 // Señal nº `index` de un sensor, contando el experimento entero.
 function readSignalAt(testName, sensor, index) {
   const { spans, total } = rowIndex(testName, sensor)
-  if (total === 0) throw new Error(`Sin señales en ${testName}/${sensor}`)
+  if (total === 0) throw new Error(`No signals in ${testName}/${sensor}`)
   if (!Number.isInteger(index) || index < 0 || index >= total) {
-    throw new Error(`Señal ${index} fuera de rango (0-${total - 1})`)
+    throw new Error(`Signal ${index} out of range (0-${total - 1})`)
   }
   const span = spans[
     // Búsqueda binaria: con 1800 tramos el escaneo lineal se nota al hacer clic.
@@ -349,7 +349,7 @@ function readSignalAt(testName, sensor, index) {
 // alineados representen de verdad los mismos instantes.
 function experimentT0(testName) {
   const g = h5file.get(testName)
-  if (!g) throw new Error(`Test no encontrado: ${testName}`)
+  if (!g) throw new Error(`Test not found: ${testName}`)
   const spans = {}
 
   // Extremos de un vector de timestamps sin leerlo entero: dos slices bastan.
@@ -394,7 +394,7 @@ function experimentT0(testName) {
   }
 
   const firsts = Object.values(spans).map((s) => s.first)
-  if (firsts.length === 0) throw new Error(`Sin timestamps en ${testName}`)
+  if (firsts.length === 0) throw new Error(`No timestamps in ${testName}`)
   const t0 = Math.min(...firsts)
   const tEnd = Math.max(...Object.values(spans).map((s) => s.last))
   return { t0, tEnd, durationS: tEnd - t0, spans }
@@ -407,7 +407,7 @@ function readGroupSummary(testName, path) {
   const tDset = h5file.get(timePath)
 
   if (!dset) {
-    throw new Error(`Dataset 'data' no encontrado en ${testName}/${path}`)
+    throw new Error(`Dataset 'data' not found in ${testName}/${path}`)
   }
 
   const [nSignals, nSamples] = dset.shape
@@ -491,7 +491,7 @@ function readHumidityData(testName) {
     timestamps = concatChunked(testName, 'humidity', 'timestamps')
     temperature = concatChunked(testName, 'humidity', 'temperature')
     if (!humidity || !timestamps) {
-      throw new Error(`Sin datos de humedad en: ${testName}`)
+      throw new Error(`No humidity data in: ${testName}`)
     }
   }
 

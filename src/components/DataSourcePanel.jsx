@@ -90,7 +90,7 @@ export default function DataSourcePanel({
           </span>
           <span className="card-meta">
             {source.tests.length} tests
-            {plottedTests.size > 0 && ` · ${plottedTests.size} en el lienzo`}
+            {plottedTests.size > 0 && ` · ${plottedTests.size} on canvas`}
           </span>
           <button
             className="card-close"
@@ -165,9 +165,9 @@ function TestNode({ test, plotted = false, editedGroups = new Map() }) {
         <span className="ds-label" title={test.name}>
           {shortDate}
         </span>
-        {editedTotal > 0 && <EditedMark count={editedTotal} scope="este experimento" />}
+        {editedTotal > 0 && <EditedMark count={editedTotal} scope="this experiment" />}
         {plotted && (
-          <span className="ds-plotted-dot" title="Graficado en el lienzo" aria-label="graficado" />
+          <span className="ds-plotted-dot" title="Plotted on the canvas" aria-label="plotted" />
         )}
       </button>
       {open && (
@@ -233,7 +233,7 @@ function ChildGroupNode({ testName, item, edited = 0 }) {
         >
           <Caret open={open} />
           <span className="ds-label">{groupLabel}</span>
-          {edited > 0 && <EditedMark count={edited} scope="este grupo" />}
+          {edited > 0 && <EditedMark count={edited} scope="this group" />}
           {duration && <span className="ds-count">{duration}</span>}
         </button>
       </div>
@@ -349,11 +349,11 @@ function SignalList({ testName, path, label: groupLabel, count }) {
 // toca nunca: esto es un recorte que vive en memoria y se pierde al recargar.
 // El texto lo dice, para que nadie crea que el archivo cambió.
 function EditedMark({ count, scope }) {
-  const label = `${count.toLocaleString()} ${count === 1 ? 'señal descartada' : 'señales descartadas'}`
+  const label = `${count.toLocaleString()} ${count === 1 ? 'signal dropped' : 'signals dropped'}`
   return (
     <span
       className="ds-edited"
-      title={`${label} en ${scope}, sólo en esta sesión — el archivo no se modifica`}
+      title={`${label} in ${scope}, this session only — the file is never modified`}
       aria-label={label}
     >
       ✂

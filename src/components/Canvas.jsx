@@ -160,14 +160,6 @@ export default function Canvas({ children, onOpenMenu, onDismiss, hasMenu, onDro
   const resetView = useCallback(() => setView({ x: 0, y: 0, k: 1 }), [])
   const atOrigin = view.x === 0 && view.y === 0 && view.k === 1
 
-  // La rejilla se repite cada casilla, así que desplazarla el resto de la
-  // división es indistinguible de desplazarla entera. Eso permite moverla con
-  // `transform` (que compone en GPU) en vez de con `background-position`, que
-  // repinta el fondo del viewport en cada frame del arrastre.
-  const tile = 32 * view.k
-  const gridX = ((view.x % tile) + tile) % tile
-  const gridY = ((view.y % tile) + tile) % tile
-
   return (
     <div
       ref={ref}
@@ -181,14 +173,6 @@ export default function Canvas({ children, onOpenMenu, onDismiss, hasMenu, onDro
       onDragOver={handleDragOver}
     >
       <div
-        className="canvas-grid"
-        aria-hidden="true"
-        style={{
-          backgroundSize: `${tile}px ${tile}px`,
-          transform: `translate3d(${gridX}px, ${gridY}px, 0)`,
-        }}
-      />
-      <div
         className="canvas-world"
         style={{
           transform: `translate3d(${view.x}px, ${view.y}px, 0) scale(${view.k})`,
@@ -200,8 +184,8 @@ export default function Canvas({ children, onOpenMenu, onDismiss, hasMenu, onDro
       </div>
 
       {!atOrigin && (
-        <button className="canvas-reset" onClick={resetView} title="Volver al origen (100%)">
-          {Math.round(view.k * 100)}% · centrar
+        <button className="canvas-reset" onClick={resetView} title="Back to origin (100%)">
+          {Math.round(view.k * 100)}% · recenter
         </button>
       )}
     </div>

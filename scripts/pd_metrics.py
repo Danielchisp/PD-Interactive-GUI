@@ -83,13 +83,22 @@ def compute_batch(x, fs, r_ohm=R_OHM):
     spread = np.einsum("ij,ij->i", dt * dt, x2) / ss
     teq = np.where(sumsq == 0, 0.0, np.sqrt(spread) * 1e6)
 
-    # --- risetime: 10%→90% del flanco que sube hasta el primer pico absoluto.
-    # El primer índice global que supera el 90% ya es <= argmax por definición,
-    # así que no hace falta recortar la búsqueda como en el bucle de JS.
-    with np.errstate(invalid="ignore"):
-        i10 = np.argmax(a >= 0.1 * absmax[:, None], axis=1)
-        i90 = np.argmax(a >= 0.9 * absmax[:, None], axis=1)
-    risetime = np.where(absmax == 0, 0.0, np.maximum(0.0, (i90 - i10) / fs * 1e9))
+    # --- risetime: tiempo entre el 10% y el 90% de la ENERGÍA ACUMULADA.
+    #
+    # Comparar la acumulada contra `fracción × total` es idéntico a normalizarla
+    # y compararla contra la fracción, y evita una división por fila. El total se
+    # toma del propio cumsum y no de `sumsq`: einsum suma por pares y cumsum en
+    # secuencia, así que difieren en el último ulp y un umbral tomado del otro
+    # podría caer un índice más allá.
+    #
+    # La acumulada es monótona no decreciente, así que argmax da el PRIMER cruce
+    # e i90 >= i10 siempre: el resultado nunca sale negativo.
+    cum = np.cumsum(x2, axis=1)
+    total = cum[:, -1]
+    safe_total = np.where(total == 0, 1.0, total)
+    i10 = np.argmax(cum >= 0.1 * safe_total[:, None], axis=1)
+    i90 = np.argmax(cum >= 0.9 * safe_total[:, None], axis=1)
+    risetime = np.where(total == 0, 0.0, (i90 - i10) / fs * 1e9)
 
     # --- Entropía de Shannon sobre un histograma de 64 bins de x/absmax
     shannon = np.zeros(rows)

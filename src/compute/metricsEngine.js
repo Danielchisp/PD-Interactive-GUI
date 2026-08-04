@@ -124,11 +124,11 @@ export function createMetricsEngine({ h5wasm, FS, sidecarPath }) {
 
   function readMetric({ test, sensor, key, sidecarBytes }) {
     const mounted = mountSidecar(sidecarBytes)
-    if (!mounted) throw new Error('No hay métricas calculadas para este archivo')
+    if (!mounted) throw new Error('No metrics computed for this file')
     const f = new h5wasm.File(sidecarPath, 'r')
     try {
       const d = f.get(`${test}/${sensor}/${key}`)
-      if (!d) throw new Error(`Métrica no encontrada: ${test}/${sensor}/${key}`)
+      if (!d) throw new Error(`Metric not found: ${test}/${sensor}/${key}`)
       const values = Float64Array.from(d.value)
       return { values, n: values.length }
     } finally {
