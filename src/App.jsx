@@ -1,19 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Canvas from './components/Canvas.jsx'
 import Menu from './components/Menu.jsx'
-import ChartCard from './components/ChartCard.jsx'
+import ChartCard, { PALETTE } from './components/ChartCard.jsx'
 import DataSourcePanel, { groupLabelFor } from './components/DataSourcePanel.jsx'
-import MetricsProgress from './components/MetricsProgress.jsx'
 import ThemeToggle from './components/ThemeToggle.jsx'
 import { hdf5 } from './hdf5/hdf5Client.js'
-import {
-  fetchSidecar,
-  loadSidecar,
-  saveSidecar,
-  sidecarKey,
-} from './hdf5/metricsStore.js'
+import { fetchSidecar, sidecarName } from './hdf5/metricsStore.js'
 import { compute } from './compute/computeClient.js'
-import { METRICS } from './compute/metrics.js'
+import { METRICS, METRIC_KEYS_12 } from './compute/metrics.js'
 import { opsFor } from './compute/operations.js'
 import {
   deleteDataset,
@@ -31,8 +25,53 @@ const contains = (c, cx, cy) =>
 const seriesSig = (series) =>
   series.map((s) => `${s.datasetId}|${s.xCol}|${s.yCol}`).join(',')
 
+// Colores distinguibles tras una fusión.
+//
+// El color de un gráfico de sensor depende del sensor, no del experimento: dos
+// scatter de UHF traen los dos el mismo verde, así que al fusionarlos las dos
+// nubes de puntos quedaban una encima de otra sin forma de separarlas.
+//
+// Sólo se recolorean las series que chocan, y por orden: la primera conserva su
+// color. Así la humedad sigue siendo azul y la temperatura roja —ahí el color
+// significa algo— y sólo se mueve lo que de verdad era ambiguo.
+// Agotada la paleta, se siguen generando tonos por ángulo áureo: reparte el
+// círculo de color sin repetir por muchas series que se fusionen.
+const spunColor = (n) => `hsl(${Math.round((n * 137.508) % 360)}, 68%, 62%)`
+
+const recolor = (series) => {
+  const used = new Set()
+  return series.map((s) => {
+    let color = s.color && !used.has(s.color) ? s.color : PALETTE.find((p) => !used.has(p))
+    for (let n = 0; !color; n += 1) {
+      const candidate = spunColor(n)
+      if (!used.has(candidate)) color = candidate
+    }
+    used.add(color)
+    return color === s.color ? s : { ...s, color }
+  })
+}
+
 const CARD_DEFAULT = { width: 576, height: 352 } // multiples of the grid step
 const PANEL_DEFAULT = { width: 320, height: 448 }
+
+// Métrica con la que nace un gráfico de sensor. Las 12 están en el sidecar, así
+// que cambiarla es leer otra columna, no calcular nada.
+const DEFAULT_METRIC = 'vpp'
+
+// Par de arranque del scatter métrica-vs-métrica. Amplitud contra forma del
+// pulso separa a ojo los grupos que interesa descartar.
+const DEFAULT_SCATTER = { x: 'vpp', y: 'kurtosis' }
+
+// Sensores con scatter propio, en orden.
+const SCATTER_SENSORS = [
+  { sensor: 'uhf', label: 'UHF', color: '#5fd68a' },
+  { sensor: 'ae', label: 'AE', color: '#ffcf5f' },
+]
+
+const exKey = (test, sensor) => `${test}|${sensor}`
+
+// "Test - 2026-07-14T14-15-47Z" -> "2026-07-14T14-15-47"
+const shortLabel = (test) => test.replace('Test - ', '').replace(/Z$/, '')
 
 let cardSeq = 0
 const nextCardId = () => {
@@ -53,8 +92,15 @@ export default function App() {
   const [error, setError] = useState(null)
   const [theme, setTheme] = useState('dark')
   const [mergeTargetId, setMergeTargetId] = useState(null) // highlighted while dragging
-  const [metricsProgress, setMetricsProgress] = useState(null) // { done, total, ... }
   const [metrics, setMetrics] = useState(null) // { key, bytes, index, fileName }
+
+  // Señales descartadas, por experimento y sensor: { "<test>|<sensor>": Set }.
+  // Vive en App y no en la tarjeta a propósito — descartar en un scatter tiene
+  // que notarse en TODAS las métricas de ese sensor, que están en otras
+  // tarjetas. Guarda índices de señal, no posiciones dibujadas, así que
+  // sobrevive a cambiar de métrica o de par de ejes.
+  const [excluded, setExcluded] = useState({})
+  const selectionRef = useRef(new Map()) // cardId -> Map(curve -> índices)
 
   const hdfInputRef = useRef(null)
   const spawnAtRef = useRef(null) // remembered click point for the panel
@@ -127,8 +173,38 @@ export default function App() {
     })
   }, [])
 
+  // Qué arrastra consigo una tarjeta, tanto al moverla como al cerrarla.
+  //
+  // El bloque apilado es la ventana principal del experimento: sus tres
+  // gráficos son una unidad —se mueven, se redimensionan y hacen zoom juntos—
+  // y los dos scatter van anclados a ella. Mover o cerrar cualquiera de los
+  // tres mueve o cierra las cinco.
+  //
+  // Al revés no, y es deliberado: un scatter suelto se mueve y se cierra solo.
+  // Si arrastrarlo moviera el experimento entero no habría forma de soltarlo
+  // sobre otro para fusionarlos, que es justo lo que hace útil compararlos.
+  //
+  // Las señales abiertas a clic tampoco entran: son exploraciones sueltas que
+  // el usuario abrió a propósito y a menudo quiere conservar para comparar.
+  const blockOf = (list, card) => {
+    if (!card.groupId) return [card] // scatter suelto, señal, gráfico aislado
+    return list.filter(
+      (c) =>
+        c.groupId === card.groupId ||
+        (card.experimentId != null && c.experimentId === card.experimentId),
+    )
+  }
+
   const removeCard = useCallback((id) => {
-    setCards((prev) => prev.filter((c) => c.id !== id))
+    const list = cardsRef.current
+    const card = list.find((c) => c.id === id)
+    if (!card) return
+    const doomed = blockOf(list, card)
+    // Los datos crudos viven fuera de React, así que hay que soltarlos a mano:
+    // un experimento son cientos de miles de puntos por gráfico.
+    doomed.forEach((c) => c.series.forEach((s) => deleteDataset(s.datasetId)))
+    const ids = new Set(doomed.map((c) => c.id))
+    setCards((prev) => prev.filter((c) => !ids.has(c.id)))
   }, [])
 
   const focusCard = useCallback((id) => {
@@ -176,14 +252,16 @@ export default function App() {
         const dragged = prev.find((c) => c.id === id)
         if (!dragged) return prev
 
-        // Grupo: se traslada el bloque entero por el mismo delta, conservando
-        // el apilado contiguo. Sin fusión.
+        // Ventana principal: se traslada el experimento entero por el mismo
+        // delta —los tres apilados y sus scatter—, conservando las posiciones
+        // relativas. Sin fusión: mezclar el bloque con otra tarjeta lo rompería.
         if (dragged.groupId) {
           const dx = pos.x - dragged.x
           const dy = pos.y - dragged.y
           if (dx === 0 && dy === 0) return prev
+          const moving = new Set(blockOf(prev, dragged).map((c) => c.id))
           return prev.map((c) =>
-            c.groupId === dragged.groupId ? { ...c, x: c.x + dx, y: c.y + dy } : c,
+            moving.has(c.id) ? { ...c, x: c.x + dx, y: c.y + dy } : c,
           )
         }
 
@@ -191,7 +269,7 @@ export default function App() {
         const target = prev.find((c) => c.id === targetId)
         if (!target) return prev.map((c) => (c.id === id ? moved : c))
 
-        const mergedSeries = [...target.series, ...moved.series]
+        const mergedSeries = recolor([...target.series, ...moved.series])
         const mergedTitle = mergedSeries.map((s) => s.name).join(' + ')
         return prev
           .filter((c) => c.id !== id)
@@ -325,7 +403,9 @@ export default function App() {
 
   // --- HDF5 source ----------------------------------------------------------
   const openHdf5 = useCallback(() => {
-    spawnAtRef.current = menu
+    // El menú se dibuja en pantalla, pero el panel nace en el mundo: con el
+    // lienzo desplazado o con zoom, no son el mismo punto.
+    spawnAtRef.current = menu ? { x: menu.worldX, y: menu.worldY } : null
     setMenu(null)
     hdfInputRef.current?.click()
   }, [menu])
@@ -353,55 +433,41 @@ export default function App() {
     }
   }, [])
 
-  // Al abrir un archivo, las 12 métricas escalares por señal deben existir.
-  // Se recuperan del sidecar cacheado y sólo se calcula lo que falte; sobre
-  // cientos de miles de señales el cálculo son minutos, de ahí la barra.
+  // Las 12 métricas por señal se calculan **antes** de levantar la GUI, con
+  // scripts/compute_metrics.py (`npm run dev` lo lanza vía predev). Aquí sólo
+  // se carga el sidecar que dejó junto al master y que sirve el dev server.
+  //
+  // El navegador no calcula métricas: sobre cientos de miles de señales eran
+  // minutos de pestaña bloqueada, y el resultado se perdía con el caché. Si
+  // falta el sidecar se avisa y se sigue — explorar y graficar señales sueltas
+  // no depende de las métricas; sólo los gráficos de Vpp se quedan sin datos.
   const ensureMetrics = useCallback(async (file) => {
-    const key = sidecarKey(file)
-    // Preferencia: el sidecar que dejó scripts/compute_metrics.py junto al
-    // master (lo sirve el dev server). Si no está, el caché del navegador.
-    let bytes = await fetchSidecar(file.name)
-    const fromDisk = bytes !== null
-    if (!bytes) bytes = await loadSidecar(key)
+    const bytes = await fetchSidecar(file.name)
+
+    if (!bytes) {
+      setError(
+        `Sin métricas para ${file.name}: falta ${sidecarName(file.name)}. ` +
+        'Corre `npm run metrics` y vuelve a abrir el archivo.',
+      )
+      return
+    }
 
     try {
+      // plan() aquí no planifica ningún cálculo: sólo contrasta lo que hay en
+      // el sidecar con los grupos del master, para saber qué falta.
       const plan = await hdf5.metricsPlan(bytes)
+      setMetrics({ bytes, index: plan.index, fileName: file.name })
 
-      if (plan.skipped.length > 0) {
+      const missing = [...plan.pending, ...plan.skipped]
+      if (missing.length > 0) {
+        const names = missing.slice(0, 3).map((g) => `${g.test}/${g.sensor}`).join(', ')
         setError(
-          `Sin métricas en ${plan.skipped.length} grupo(s): falta el atributo fs_<sensor> ` +
-          `en el experimento (${plan.skipped.map((s) => `${s.test}/${s.sensor}`).join(', ')}).`,
+          `Faltan métricas en ${missing.length} grupo(s) (${names}` +
+          `${missing.length > 3 ? ', …' : ''}). Corre \`npm run metrics\`.`,
         )
       }
-
-      // Ya estaba todo calculado (por el CLI o en una sesión anterior).
-      if (plan.pending.length === 0) {
-        if (bytes) {
-          setMetrics({ key, bytes, index: plan.index, fileName: file.name, fromDisk })
-          // Si vino del disco no se duplica en IndexedDB: el archivo manda.
-          if (!fromDisk) await saveSidecar(key, bytes)
-        }
-        return
-      }
-
-      setMetricsProgress({
-        done: 0,
-        total: plan.totalSignals,
-        phase: 'start',
-        startedAt: performance.now(),
-      })
-
-      const run = await hdf5.metricsRun(bytes, (p) =>
-        setMetricsProgress((prev) => (prev ? { ...prev, ...p } : prev)),
-      )
-
-      bytes = run.bytes
-      await saveSidecar(key, bytes)
-      setMetrics({ key, bytes, index: run.index, fileName: file.name })
     } catch (err) {
       setError(`Métricas: ${err?.message || err}`)
-    } finally {
-      setMetricsProgress(null)
     }
   }, [])
 
@@ -457,41 +523,124 @@ export default function App() {
     ]
   }, [])
 
-  // Vpp por sensor. El valor sale del sidecar ya calculado — el frontend no
-  // computa métricas — y el eje X de los timestamps del master, que el
-  // sidecar no guarda.
-  const buildVppChart = useCallback(async (test, sensor, t0, color) => {
+  // Etiqueta del eje Y de una métrica: "VPP (V) · UHF".
+  const metricLabel = (metricKey, sensor) => {
+    const m = METRICS[metricKey] || { label: metricKey, unit: '' }
+    return `${m.label}${m.unit ? ` (${m.unit})` : ''} · ${sensor.toUpperCase()}`
+  }
+
+  // Una métrica por sensor, en scatter. El valor sale del sidecar ya calculado
+  // —el frontend no computa métricas— y el eje X de los timestamps del master,
+  // que el sidecar no guarda.
+  const buildMetricChart = useCallback(async (test, sensor, t0, color, metricKey) => {
     if (!metrics?.bytes) throw new Error('sin métricas: ejecuta npm run metrics')
 
     const [m, ts] = await Promise.all([
-      hdf5.readMetric(test, sensor, 'vpp', metrics.bytes),
+      hdf5.readMetric(test, sensor, metricKey, metrics.bytes),
       hdf5.readTimestamps(test, sensor),
     ])
     const n = Math.min(m.n, ts.n)
     const xs = new Float64Array(n)
     for (let i = 0; i < n; i += 1) xs[i] = ts.values[i] - t0
 
-    const ycol = `Vpp (V) · ${sensor.toUpperCase()}`
+    const ycol = metricLabel(metricKey, sensor)
     const id = nextDatasetId()
     putDataset({
       id,
-      name: `${sensor.toUpperCase()} Vpp - ${test}`,
+      name: `${sensor.toUpperCase()} ${metricKey} - ${test}`,
       columns: [XCOL, ycol],
       rowCount: n,
       data: { [XCOL]: xs, [ycol]: m.values.subarray(0, n) },
-      meta: { test, sensor, metricKey: 'vpp', fromSidecar: true },
+      // `perSignal`: cada fila es una señal, no una muestra. Es lo que autoriza
+      // a enmascarar esta serie con las señales descartadas — y lo que permite
+      // volver del punto del scatter a la señal, porque el índice del punto es
+      // el de la señal en el experimento entero.
+      // `t0` viaja con el dataset porque al fusionar dos experimentos cada
+      // serie conserva el suyo: sin él, reconstruir la métrica de una serie
+      // ajena la referiría al origen de tiempo del otro experimento.
+      meta: { test, sensor, metricKey, t0, perSignal: true, fromSidecar: true },
     })
 
-    return [{ datasetId: id, xCol: XCOL, yCol: ycol, name: ycol, color, mode: 'markers' }]
+    return [{
+      datasetId: id,
+      xCol: XCOL,
+      yCol: ycol,
+      name: ycol,
+      // Sólo para la leyenda. El eje sigue titulándose con `name`, que si no
+      // acabaría arrastrando la fecha; en la leyenda, en cambio, es lo único
+      // que distingue dos series fusionadas de experimentos distintos.
+      legendName: `${ycol} · ${shortLabel(test)}`,
+      color,
+      mode: 'markers',
+    }]
+  }, [metrics])
+
+  // Scatter métrica contra métrica, uno por sensor. Es el gráfico desde el que
+  // se filtra: un punto sigue siendo una señal, así que seleccionar con
+  // rectángulo o lazo selecciona señales, y descartarlas las quita de todas las
+  // métricas de ese sensor.
+  const buildScatterChart = useCallback(async (test, sensor, xMetric, yMetric, color) => {
+    if (!metrics?.bytes) throw new Error('sin métricas: ejecuta npm run metrics')
+
+    const [mx, my] = await Promise.all([
+      hdf5.readMetric(test, sensor, xMetric, metrics.bytes),
+      hdf5.readMetric(test, sensor, yMetric, metrics.bytes),
+    ])
+    const n = Math.min(mx.n, my.n)
+    const xcol = metricLabel(xMetric, sensor)
+    const ycol = metricLabel(yMetric, sensor)
+    // Dos métricas distintas del mismo sensor pueden dar la misma etiqueta si
+    // se eligen iguales; entonces sobra una columna y el eje Y se queda vacío.
+    const yname = xcol === ycol ? `${ycol} ` : ycol
+
+    const id = nextDatasetId()
+    putDataset({
+      id,
+      name: `${sensor.toUpperCase()} ${yMetric} vs ${xMetric} - ${test}`,
+      columns: [xcol, yname],
+      rowCount: n,
+      data: { [xcol]: mx.values.subarray(0, n), [yname]: my.values.subarray(0, n) },
+      meta: { test, sensor, metricKey: yMetric, xMetric, perSignal: true, fromSidecar: true },
+    })
+
+    return [{
+      datasetId: id,
+      xCol: xcol,
+      yCol: yname,
+      name: yname,
+      legendName: `${yname} vs ${METRICS[xMetric]?.label || xMetric} · ${shortLabel(test)}`,
+      color,
+      mode: 'markers',
+    }]
   }, [metrics])
 
   // Los tres gráficos del experimento, en orden de apilado. La clave es el
   // nombre del grupo en el HDF5, para poder resolver un arrastre suelto.
+  // Los de sensor llevan `sensor`: son los que aceptan cambio de métrica y
+  // clic en un punto.
   const chartSpecs = useMemo(() => [
-    { key: 'humidity', label: 'Temp/Hum Data', build: (t, t0) => buildEnvChart(t, t0) },
-    { key: 'uhf', label: 'UHF Data · Vpp', build: (t, t0) => buildVppChart(t, 'uhf', t0, '#5fd68a') },
-    { key: 'ae', label: 'AE Data · Vpp', build: (t, t0) => buildVppChart(t, 'ae', t0, '#ffcf5f') },
-  ], [buildEnvChart, buildVppChart])
+    {
+      key: 'humidity',
+      label: 'Temp/Hum Data',
+      build: (t, t0) => buildEnvChart(t, t0),
+    },
+    {
+      key: 'uhf',
+      label: 'UHF Data',
+      sensor: 'uhf',
+      color: '#5fd68a',
+      build: (t, t0, metricKey = DEFAULT_METRIC) =>
+        buildMetricChart(t, 'uhf', t0, '#5fd68a', metricKey),
+    },
+    {
+      key: 'ae',
+      label: 'AE Data',
+      sensor: 'ae',
+      color: '#ffcf5f',
+      build: (t, t0, metricKey = DEFAULT_METRIC) =>
+        buildMetricChart(t, 'ae', t0, '#ffcf5f', metricKey),
+    },
+  ], [buildEnvChart, buildMetricChart])
 
   const patchCard = useCallback((id, p) => {
     setCards((prev) => prev.map((c) => (c.id === id ? { ...c, ...p } : c)))
@@ -501,13 +650,20 @@ export default function App() {
   // sincronizado. Las tarjetas aparecen ya, en carga, y se rellenan al llegar
   // sus datos; un fallo en una no arrastra a las demás.
   const dropExperiment = useCallback(async (test, at) => {
-    const shortDate = test.replace('Test - ', '').replace(/Z$/, '')
+    const shortDate = shortLabel(test)
     const x = snap(at.x)
     const y0 = snap(at.y)
     const width = CARD_DEFAULT.width
     const height = 224 // múltiplo de GRID: el apilado sigue cuadrando al soltar
     const ids = chartSpecs.map(() => nextCardId())
+    const scatterIds = SCATTER_SENSORS.map(() => nextCardId())
+    // `groupId` es el bloque geométrico (los tres apilados: mismo tamaño, misma
+    // posición encadenada, mismo zoom del eje X). `experimentId` es más ancho:
+    // esos tres más sus scatter, que ni se apilan ni comparten eje pero se
+    // cierran con ellos. Arrastrar dos veces el mismo experimento da dos
+    // experimentId distintos, y cada copia se cierra por su cuenta.
     const groupId = `grp_${ids[0]}`
+    const experimentId = `exp_${ids[0]}`
 
     setCards((prev) => [
       ...prev,
@@ -522,10 +678,37 @@ export default function App() {
         alignedMargin: true,
         groupId,
         groupIndex: i,
+        experimentId,
+        test, // para resaltar el experimento en el explorador
+        sensor: spec.sensor ?? null,
+        metricKey: spec.sensor ? DEFAULT_METRIC : null,
         x,
         y: y0 + i * height,
         width,
         height,
+        z: bumpZ(),
+      })),
+      // Los scatter métrica-vs-métrica van al lado, no en el bloque: su eje X
+      // es una métrica, no el tiempo, así que ni se alinean ni comparten zoom
+      // con los tres apilados.
+      ...SCATTER_SENSORS.map((s, i) => ({
+        id: scatterIds[i],
+        title: `${s.label} · dispersión · ${shortDate}`,
+        domain: 'metric',
+        kind: 'metricScatter',
+        series: [],
+        source: null,
+        loading: true,
+        loadingLabel: `${s.label} dispersión…`,
+        experimentId, // satélite: se cierra con el bloque, pero no al revés
+        test,
+        sensor: s.sensor,
+        xMetric: DEFAULT_SCATTER.x,
+        yMetric: DEFAULT_SCATTER.y,
+        x: x + width + GRID,
+        y: y0 + i * (height + GRID + 96),
+        width,
+        height: height + 96,
         z: bumpZ(),
       })),
     ])
@@ -541,15 +724,20 @@ export default function App() {
     }
     const xRange = [0, info.durationS]
 
-    await Promise.all(
-      chartSpecs.map((spec, i) =>
+    await Promise.all([
+      ...chartSpecs.map((spec, i) =>
         spec
           .build(test, info.t0)
-          .then((series) => patchCard(ids[i], { loading: false, xRange, series }))
+          .then((series) => patchCard(ids[i], { loading: false, xRange, series, t0: info.t0 }))
           .catch((e) => fail(ids[i], e?.message || 'failed')),
       ),
-    )
-  }, [chartSpecs, patchCard])
+      ...SCATTER_SENSORS.map((s, i) =>
+        buildScatterChart(test, s.sensor, DEFAULT_SCATTER.x, DEFAULT_SCATTER.y, s.color)
+          .then((series) => patchCard(scatterIds[i], { loading: false, series, t0: info.t0 }))
+          .catch((e) => fail(scatterIds[i], e?.message || 'failed')),
+      ),
+    ])
+  }, [chartSpecs, buildScatterChart, patchCard])
 
   // Arrastrar un grupo suelto: exactamente el mismo gráfico que aporta al
   // bloque, con el mismo origen de tiempo y el mismo rango, pero solo.
@@ -557,7 +745,7 @@ export default function App() {
     const spec = chartSpecs.find((c) => c.key === groupName)
     if (!spec) throw new Error(`Sin gráfico definido para "${groupName}"`)
 
-    const shortDate = test.replace('Test - ', '').replace(/Z$/, '')
+    const shortDate = shortLabel(test)
     const id = nextCardId()
 
     setCards((prev) => [
@@ -571,6 +759,9 @@ export default function App() {
         loading: true,
         loadingLabel: `${spec.label}…`,
         alignedMargin: true,
+        test,
+        sensor: spec.sensor ?? null,
+        metricKey: spec.sensor ? DEFAULT_METRIC : null,
         x: snap(at.x),
         y: snap(at.y),
         width: CARD_DEFAULT.width,
@@ -582,11 +773,201 @@ export default function App() {
     try {
       const info = await hdf5.experimentT0(test)
       const series = await spec.build(test, info.t0)
-      patchCard(id, { loading: false, xRange: [0, info.durationS], series })
+      patchCard(id, { loading: false, xRange: [0, info.durationS], series, t0: info.t0 })
     } catch (err) {
       patchCard(id, { loading: false, error: err?.message || 'failed' })
     }
   }, [chartSpecs, patchCard])
+
+  // Cambiar la métrica de un eje. Las 12 están en el sidecar, así que esto es
+  // leer otra columna: no se recalcula nada ni se toca el master. Descartar y
+  // cambiar de métrica son independientes — la exclusión guarda índices de
+  // señal, así que sigue valiendo con otros ejes.
+  // Cambiar un eje reconstruye TODAS las series de la tarjeta, cada una contra
+  // su propio experimento y sensor. Fusionar dos scatter da un scatter —misma
+  // naturaleza—, así que conserva sus desplegables: los ejes son de la tarjeta
+  // y las series son lo que se compara en ellos.
+  const changeMetric = useCallback(async (cardId, axis, metricKey) => {
+    const card = cardsRef.current.find((c) => c.id === cardId)
+    if (!card?.sensor) return
+
+    const isScatter = card.kind === 'metricScatter'
+    const current = isScatter ? (axis === 'x' ? card.xMetric : card.yMetric) : card.metricKey
+    if (current === metricKey) return
+
+    const xMetric = axis === 'x' ? metricKey : card.xMetric
+    const yMetric = axis === 'y' ? metricKey : card.yMetric
+
+    const old = card.series
+    patchCard(cardId, { loading: true, loadingLabel: `${METRICS[metricKey]?.label || metricKey}…` })
+    try {
+      const replaced = []
+      const series = await Promise.all(old.map(async (s) => {
+        const meta = getDataset(s.datasetId)?.meta
+        // Lo que no está indexado por señal no es una métrica y no se toca: en
+        // una tarjeta que mezcle ambiental con métricas, la humedad sigue ahí.
+        if (!meta?.perSignal) return s
+
+        const test = meta.test ?? card.test
+        const sensor = meta.sensor ?? card.sensor
+        const [built] = isScatter
+          ? await buildScatterChart(test, sensor, xMetric, yMetric, s.color)
+          : await buildMetricChart(
+              test,
+              sensor,
+              meta.t0 ?? card.t0 ?? (await hdf5.experimentT0(test)).t0,
+              s.color,
+              metricKey,
+            )
+        replaced.push(s.datasetId)
+        // El color y el eje son de la serie, no de la métrica: sobreviven al
+        // cambio, que si no una fusión recolocada perdería sus colores.
+        return { ...built, color: s.color, ...(s.axis ? { axis: s.axis } : {}) }
+      }))
+
+      patchCard(cardId, {
+        loading: false,
+        error: null,
+        series,
+        ...(isScatter ? { xMetric, yMetric } : { metricKey }),
+      })
+      replaced.forEach((id) => deleteDataset(id))
+    } catch (err) {
+      patchCard(cardId, { loading: false, error: err?.message || 'failed' })
+    }
+  }, [buildScatterChart, buildMetricChart, patchCard])
+
+  // --- Descarte de señales ----------------------------------------------------
+  // La selección es efímera y no pinta nada de React: se guarda en una ref para
+  // que arrastrar el lazo no re-renderice el lienzo entero en cada movimiento.
+  const selectPoints = useCallback((cardId, byCurve) => {
+    if (!byCurve || byCurve.size === 0) selectionRef.current.delete(cardId)
+    else selectionRef.current.set(cardId, byCurve)
+  }, [])
+
+  // Descartar lo seleccionado. Se resuelve el sensor por la traza, no por la
+  // tarjeta, y se acumula sobre lo ya descartado.
+  const dropSelection = useCallback((cardId) => {
+    const card = cardsRef.current.find((c) => c.id === cardId)
+    const byCurve = selectionRef.current.get(cardId)
+    if (!card || !byCurve || byCurve.size === 0) {
+      setError('Selecciona puntos con el rectángulo o el lazo antes de quitarlos.')
+      return
+    }
+
+    setExcluded((prev) => {
+      const next = { ...prev }
+      for (const [curve, indices] of byCurve) {
+        const s = card.series[curve]
+        const meta = s ? getDataset(s.datasetId)?.meta : null
+        const test = meta?.test ?? card.test
+        const sensor = meta?.sensor ?? card.sensor
+        if (!test || !sensor) continue
+        const key = exKey(test, sensor)
+        const set = new Set(next[key] || [])
+        indices.forEach((i) => set.add(i))
+        next[key] = set // Set nuevo: la identidad es lo que dispara el redibujado
+      }
+      return next
+    })
+    selectionRef.current.delete(cardId)
+  }, [])
+
+  const resetExclusion = useCallback((cardId) => {
+    const card = cardsRef.current.find((c) => c.id === cardId)
+    if (!card?.sensor) return
+    const key = exKey(card.test, card.sensor)
+    setExcluded((prev) => {
+      if (!prev[key]) return prev
+      const next = { ...prev }
+      delete next[key]
+      return next
+    })
+    selectionRef.current.delete(cardId)
+  }, [])
+
+  // Máscara de cada serie de una tarjeta: la del sensor al que pertenece su
+  // dataset.
+  //
+  // Sólo se enmascara lo que está indexado POR SEÑAL (`perSignal`), que son los
+  // gráficos de métrica. Una tarjeta de señal lleva el mismo test y el mismo
+  // sensor en sus metadatos, pero sus filas son muestras: aplicarle la máscara
+  // le arrancaba a la forma de onda las muestras cuyo número coincidía con el
+  // de una señal descartada, y la señal salía incompleta.
+  const masksFor = useCallback((card) => card.series.map((s) => {
+    const meta = getDataset(s.datasetId)?.meta
+    if (!meta?.perSignal || !meta.test || !meta.sensor) return null
+    return excluded[exKey(meta.test, meta.sensor)] || null
+  }), [excluded])
+
+  // Clic en un punto del scatter: la señal temporal que hay detrás, en una
+  // tarjeta suelta. El índice del punto es el de la señal en el experimento
+  // entero —el mismo con el que se escribió el sidecar—, no dentro de un chunk.
+  const openSignalAt = useCallback(async (cardId, index, curve = 0) => {
+    const card = cardsRef.current.find((c) => c.id === cardId)
+    if (!card || !Number.isInteger(index)) return
+
+    // De qué serie salió el punto. Una tarjeta fusionada puede mezclar sensores
+    // o experimentos, así que el origen lo dice el dataset de esa traza, no la
+    // tarjeta; si no lleva metadatos de sensor, no hay señal que abrir.
+    const clicked = card.series[curve]
+    const meta = clicked ? getDataset(clicked.datasetId)?.meta : null
+    const test = meta?.test ?? card.test
+    const sensor = meta?.sensor ?? card.sensor
+    if (!test || !sensor) return
+
+    const sensorLabel = sensor.toUpperCase()
+    const title = `${sensorLabel} · señal #${index + 1}`
+    const id = nextCardId()
+
+    // Cascada desde la tarjeta de origen. Cuenta las que ya salieron de ella:
+    // sin esto, clic tras clic las apilaba en el mismo punto y sólo se veía la
+    // última. Se reinicia cada 8 para no irse al infinito.
+    const born = cardsRef.current.filter((c) => c.fromCardId === card.id).length
+    const step = (born % 8) * GRID
+
+    setCards((prev) => [
+      ...prev,
+      {
+        id,
+        title,
+        domain: 'time',
+        series: [],
+        source: null,
+        loading: true,
+        loadingLabel: `${title}…`,
+        test,
+        fromCardId: card.id,
+        x: snap(card.x + card.width + GRID + step),
+        y: snap(card.y + step),
+        width: CARD_DEFAULT.width,
+        height: CARD_DEFAULT.height,
+        z: bumpZ(),
+      },
+    ])
+
+    try {
+      const res = await hdf5.readSignalAt(test, sensor, index)
+      const xcol = 't (muestras)'
+      const x = new Float64Array(res.nSamples)
+      for (let i = 0; i < res.nSamples; i += 1) x[i] = i * res.dt
+      const dsId = nextDatasetId()
+      putDataset({
+        id: dsId,
+        name: title,
+        columns: [xcol, title],
+        rowCount: res.nSamples,
+        data: { [xcol]: x, [title]: res.y },
+        meta: { test, sensor, index },
+      })
+      patchCard(id, {
+        loading: false,
+        series: [{ datasetId: dsId, xCol: xcol, yCol: title, name: title }],
+      })
+    } catch (err) {
+      patchCard(id, { loading: false, error: err?.message || 'failed' })
+    }
+  }, [patchCard])
 
   // onDropSignal se declara antes, así que los alcanza por ref.
   const dropExperimentRef = useRef(dropExperiment)
@@ -745,6 +1126,24 @@ export default function App() {
 
   const empty = cards.length === 0 && !source
 
+  // Experimentos con alguna tarjeta viva: el explorador los resalta para que se
+  // vea de un vistazo qué está ya en el lienzo.
+  const plottedTests = useMemo(
+    () => new Set(cards.map((c) => c.test).filter(Boolean)),
+    [cards],
+  )
+
+  // Grupos con señales descartadas, para marcarlos en el explorador:
+  // { "<test>|<sensor>": nº descartadas }. Es estado de la sesión y nada más —
+  // el HDF5 se abre en sólo lectura y no se toca nunca.
+  const editedGroups = useMemo(() => {
+    const m = new Map()
+    for (const [key, set] of Object.entries(excluded)) {
+      if (set?.size > 0) m.set(key, set.size)
+    }
+    return m
+  }, [excluded])
+
   // Build the menu items for the currently open menu.
   const menuItems = (m) => {
     if (m.kind === 'canvas') {
@@ -774,12 +1173,24 @@ export default function App() {
         hasMenu={!!menu}
         onDropSignal={onDropSignal}
       >
-        {cards.map((card) => (
+        {cards.map((card) => {
+          const masks = masksFor(card)
+          return (
           <ChartCard
             key={card.id}
             card={card}
             theme={theme}
             isMergeTarget={card.id === mergeTargetId}
+            masks={masks}
+            // Firma estable: el redibujado depende de qué hay descartado, no de
+            // la identidad del array que se recrea en cada render.
+            maskSig={masks.map((m) => (m ? m.size : 0)).join(',')}
+            excludedCount={
+              card.sensor ? (excluded[exKey(card.test, card.sensor)]?.size ?? 0) : 0
+            }
+            onSelectPoints={(byCurve) => selectPoints(card.id, byCurve)}
+            onDropSelection={() => dropSelection(card.id)}
+            onResetExclusion={() => resetExclusion(card.id)}
             onChange={(patch) => updateCard(card.id, patch)}
             onDragMove={(pos) => cardDragMove(card.id, pos)}
             onDragStop={(pos) => cardDragStop(card.id, pos)}
@@ -787,8 +1198,12 @@ export default function App() {
             onClose={() => removeCard(card.id)}
             onFocus={() => focusCard(card.id)}
             onContextMenu={(pos) => openCardMenu(card.id, pos)}
+            metricKeys={METRIC_KEYS_12}
+            onMetricChange={(axis, key) => changeMetric(card.id, axis, key)}
+            onPointClick={(index, curve) => openSignalAt(card.id, index, curve)}
           />
-        ))}
+          )
+        })}
         {source && (
           <DataSourcePanel
             source={source}
@@ -796,6 +1211,8 @@ export default function App() {
             onChange={updateSourceGeom}
             onClose={closeSource}
             onFocus={focusSource}
+            plottedTests={plottedTests}
+            editedGroups={editedGroups}
           />
         )}
       </Canvas>
@@ -809,8 +1226,6 @@ export default function App() {
       )}
 
       {opening && <div className="hint">opening HDF5…</div>}
-
-      <MetricsProgress state={metricsProgress} />
 
       {error && (
         <div className="toast-error" onClick={() => setError(null)}>

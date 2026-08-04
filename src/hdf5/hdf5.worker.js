@@ -94,6 +94,7 @@ function openFile(file) {
     try { h5file.close() } catch (e) { /* noop */ }
     h5file = null
   }
+  rowIndexCache.clear() // los offsets son de este archivo, no del siguiente
   makeLazyNode(file)
   h5file = new h5wasm.File(MOUNT, 'r')
 
@@ -217,16 +218,130 @@ function readSignalData(testName, path, row = 0, datasetName = 'data') {
   }
 }
 
+// --- Layout chunks-v2 --------------------------------------------------------
+// En chunks-v2 un sensor no es un dataset por test sino un bloque por chunk:
+//
+//   /<test>/chunk_NNNNNN/<origen>/{data,timestamps}
+//
+// Concatenarlos en el orden de `chunk_index` reconstruye el vector que en
+// plano-v1 está escrito de una pieza. Es el mismo orden que usa
+// scripts/compute_metrics.py, así que la fila i del sidecar y el instante i de
+// aquí son la misma señal.
+
+const CHUNK_SOURCES = { uhf: 'signals', ae: 'ae_signals' }
+
+// Chunks de un test ordenados por chunk_index, no por nombre.
+function chunkOrder(testName) {
+  const g = h5file.get(testName)
+  if (!g) return []
+  return g.keys()
+    .filter((k) => k.startsWith('chunk_'))
+    .map((k) => ({ key: k, i: Number(attrVal(h5file.get(`${testName}/${k}`), 'chunk_index') ?? -1) }))
+    .sort((a, b) => (a.i - b.i) || a.key.localeCompare(b.key))
+    .map((c) => c.key)
+}
+
+// Concatena un dataset 1-D repartido entre los chunks. Devuelve null si no hay
+// ninguno (test en plano-v1, o sensor ausente de este test).
+function concatChunked(testName, subPath, dsetName) {
+  const parts = []
+  let total = 0
+  for (const chunk of chunkOrder(testName)) {
+    const d = h5file.get(`${testName}/${chunk}/${subPath}/${dsetName}`)
+    if (!d || !d.shape || d.shape.length !== 1 || d.shape[0] === 0) continue
+    const v = Float64Array.from(d.value)
+    parts.push(v)
+    total += v.length
+  }
+  if (parts.length === 0) return null
+  const out = new Float64Array(total)
+  let at = 0
+  for (const p of parts) {
+    out.set(p, at)
+    at += p.length
+  }
+  return out
+}
+
 // Timestamps de un grupo en float64. NO se puede usar readSignalData para
 // esto: devuelve Float32Array, y un epoch como 1784038547 en float32 pierde
 // unos 100 s de precisión, suficiente para descuadrar el eje de tiempo.
 function readTimestamps(testName, path) {
   const dset = h5file.get(`${testName}/${path}/timestamps`)
-  if (!dset || !dset.shape || dset.shape.length !== 1) {
-    throw new Error(`Sin timestamps en ${testName}/${path}`)
+  if (dset && dset.shape && dset.shape.length === 1) {
+    const values = Float64Array.from(dset.value)
+    return { values, n: values.length, transfer: [values.buffer] }
   }
-  const values = Float64Array.from(dset.value)
+  // chunks-v2: `path` es el sensor ('uhf' | 'ae') o un grupo por chunk.
+  const source = CHUNK_SOURCES[path] || path
+  const values = concatChunked(testName, source, 'timestamps')
+  if (!values) throw new Error(`Sin timestamps en ${testName}/${path}`)
   return { values, n: values.length, transfer: [values.buffer] }
+}
+
+// Índice de tramos de un sensor: [{ path, start, rows }] con `start` el offset
+// global de cada tramo. Es lo que traduce "señal nº i del experimento" —el
+// índice de un punto del scatter, que va contra el vector entero del sidecar—
+// a un dataset y una fila concretos.
+//
+// En chunks-v2 esto obliga a mirar los ~1800 chunks de un test, así que el
+// resultado se memoiza: hacer clic en varios puntos del mismo scatter no
+// vuelve a recorrerlos.
+const rowIndexCache = new Map()
+
+function rowIndex(testName, sensor) {
+  const cacheKey = `${testName}|${sensor}`
+  const hit = rowIndexCache.get(cacheKey)
+  if (hit) return hit
+
+  const flat = h5file.get(`${testName}/${sensor}/data`)
+  let spans
+  if (flat && flat.shape && flat.shape.length === 2) {
+    spans = [{ path: `${testName}/${sensor}/data`, start: 0, rows: flat.shape[0] }]
+  } else {
+    const source = CHUNK_SOURCES[sensor] || sensor
+    spans = []
+    let start = 0
+    for (const chunk of chunkOrder(testName)) {
+      const d = h5file.get(`${testName}/${chunk}/${source}/data`)
+      if (!d || !d.shape || d.shape.length !== 2 || d.shape[0] === 0) continue
+      spans.push({ path: `${testName}/${chunk}/${source}/data`, start, rows: d.shape[0] })
+      start += d.shape[0]
+    }
+  }
+
+  const total = spans.reduce((n, s) => n + s.rows, 0)
+  const index = { spans, total }
+  rowIndexCache.set(cacheKey, index)
+  return index
+}
+
+// Señal nº `index` de un sensor, contando el experimento entero.
+function readSignalAt(testName, sensor, index) {
+  const { spans, total } = rowIndex(testName, sensor)
+  if (total === 0) throw new Error(`Sin señales en ${testName}/${sensor}`)
+  if (!Number.isInteger(index) || index < 0 || index >= total) {
+    throw new Error(`Señal ${index} fuera de rango (0-${total - 1})`)
+  }
+  const span = spans[
+    // Búsqueda binaria: con 1800 tramos el escaneo lineal se nota al hacer clic.
+    (() => {
+      let lo = 0
+      let hi = spans.length - 1
+      while (lo < hi) {
+        const mid = (lo + hi + 1) >> 1
+        if (spans[mid].start <= index) lo = mid
+        else hi = mid - 1
+      }
+      return lo
+    })()
+  ]
+
+  const dset = h5file.get(span.path)
+  const nSamples = dset.shape[1]
+  const row = index - span.start
+  const y = Float32Array.from(dset.slice([[row, row + 1], [0, nSamples]]))
+  return { y, nSamples, dt: 1, index, total, transfer: [y.buffer] }
 }
 
 // Instante inicial común del experimento: el mínimo de los primeros
@@ -235,20 +350,52 @@ function readTimestamps(testName, path) {
 function experimentT0(testName) {
   const g = h5file.get(testName)
   if (!g) throw new Error(`Test no encontrado: ${testName}`)
-  let t0 = Infinity
   const spans = {}
-  for (const key of g.keys()) {
-    const child = h5file.get(`${testName}/${key}`)
-    if (!(child instanceof h5wasm.Group) || !child.keys().includes('timestamps')) continue
-    const t = h5file.get(`${testName}/${key}/timestamps`)
-    if (!t || !t.shape || t.shape.length !== 1 || t.shape[0] < 1) continue
+
+  // Extremos de un vector de timestamps sin leerlo entero: dos slices bastan.
+  const edges = (path) => {
+    const t = h5file.get(`${path}/timestamps`)
+    if (!t || !t.shape || t.shape.length !== 1 || t.shape[0] < 1) return null
     const n = t.shape[0]
-    const first = Number(t.slice([[0, 1]])[0])
-    const last = Number(t.slice([[n - 1, n]])[0])
-    spans[key] = { first, last, n }
-    if (first < t0) t0 = first
+    return {
+      first: Number(t.slice([[0, 1]])[0]),
+      last: Number(t.slice([[n - 1, n]])[0]),
+      n,
+    }
   }
-  if (!Number.isFinite(t0)) throw new Error(`Sin timestamps en ${testName}`)
+
+  const chunks = chunkOrder(testName)
+  if (chunks.length > 0) {
+    // chunks-v2: el span de un sensor va del primer chunk con datos al último.
+    // Se buscan por los extremos y se para al encontrarlos: recorrer los 1800
+    // chunks de un test para sumar una `n` que nadie usa costaría miles de
+    // lecturas sobre el VFS perezoso.
+    for (const [name, source] of [...Object.entries(CHUNK_SOURCES), ['humidity', 'humidity']]) {
+      let first = null
+      for (const chunk of chunks) {
+        first = edges(`${testName}/${chunk}/${source}`)
+        if (first) break
+      }
+      if (!first) continue
+      let last = null
+      for (let i = chunks.length - 1; i >= 0; i -= 1) {
+        last = edges(`${testName}/${chunks[i]}/${source}`)
+        if (last) break
+      }
+      spans[name] = { first: first.first, last: (last || first).last }
+    }
+  } else {
+    for (const key of g.keys()) {
+      const child = h5file.get(`${testName}/${key}`)
+      if (!(child instanceof h5wasm.Group) || !child.keys().includes('timestamps')) continue
+      const e = edges(`${testName}/${key}`)
+      if (e) spans[key] = e
+    }
+  }
+
+  const firsts = Object.values(spans).map((s) => s.first)
+  if (firsts.length === 0) throw new Error(`Sin timestamps en ${testName}`)
+  const t0 = Math.min(...firsts)
   const tEnd = Math.max(...Object.values(spans).map((s) => s.last))
   return { t0, tEnd, durationS: tEnd - t0, spans }
 }
@@ -327,20 +474,26 @@ function readGroupSummary(testName, path) {
 
 function readHumidityData(testName) {
   const g = h5file.get(`${testName}/humidity`)
-  if (!g) {
-    throw new Error(`Grupo humidity no encontrado en: ${testName}/humidity`)
-  }
-  const humDset = h5file.get(`${testName}/humidity/humidity`)
-  const tempDset = h5file.get(`${testName}/humidity/temperature`)
-  const timeDset = h5file.get(`${testName}/humidity/timestamps`)
+  const humDset = g && h5file.get(`${testName}/humidity/humidity`)
+  const timeDset = g && h5file.get(`${testName}/humidity/timestamps`)
 
-  if (!humDset || !timeDset) {
-    throw new Error(`Datasets de humedad o timestamps no encontrados en: ${testName}/humidity`)
+  let humidity
+  let timestamps
+  let temperature
+  if (humDset && timeDset) {
+    const tempDset = h5file.get(`${testName}/humidity/temperature`)
+    humidity = Float64Array.from(humDset.value)
+    timestamps = Float64Array.from(timeDset.value)
+    temperature = tempDset ? Float64Array.from(tempDset.value) : null
+  } else {
+    // chunks-v2: cada chunk lleva su propio tramo de ambiental.
+    humidity = concatChunked(testName, 'humidity', 'humidity')
+    timestamps = concatChunked(testName, 'humidity', 'timestamps')
+    temperature = concatChunked(testName, 'humidity', 'temperature')
+    if (!humidity || !timestamps) {
+      throw new Error(`Sin datos de humedad en: ${testName}`)
+    }
   }
-
-  const humidity = Float64Array.from(humDset.value)
-  const timestamps = Float64Array.from(timeDset.value)
-  const temperature = tempDset ? Float64Array.from(tempDset.value) : null
 
   const nSamples = humidity.length
 
@@ -372,15 +525,12 @@ const handlers = {
   testChildren: (p) => listTestChildren(p.test),
   chunks: (p) => listTestChildren(p.test), // retrocompatibilidad
   readSignal: (p) => readSignalData(p.test, p.path, p.row, p.datasetName),
+  readSignalAt: (p) => readSignalAt(p.test, p.sensor, p.index),
   readHumidity: (p) => readHumidityData(p.test),
   readGroupSummary: (p) => readGroupSummary(p.test, p.path),
   readGroupMatrix: (p) => readGroupSummary(p.test, p.path),
   signal: (p) => readSignalData(p.test, `${p.chunk}/signals`, p.row, 'data'), // retrocompatibilidad
   metricsPlan: (p) => metricsEngine().plan(h5file, p.sidecarBytes),
-  metricsRun: (p, emit) => {
-    const r = metricsEngine().run(h5file, p.sidecarBytes, emit)
-    return { ...r, transfer: [r.bytes.buffer] }
-  },
   readTimestamps: (p) => readTimestamps(p.test, p.path),
   experimentT0: (p) => experimentT0(p.test),
   readMetric: (p) => {

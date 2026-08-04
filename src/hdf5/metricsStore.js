@@ -1,47 +1,20 @@
-// Persistencia del sidecar de métricas entre sesiones.
+// De dónde salen las métricas en la GUI.
 //
-// El sidecar es un HDF5 real que genera scripts/compute_metrics.py, pero el
-// navegador no puede ir a buscarlo solo al disco junto al master. Para que
-// "calcular sólo lo que falte" funcione sin obligar al usuario a elegir un
-// archivo cada vez, los mismos bytes se cachean en IndexedDB indexados por
-// identidad del master (nombre + tamaño + fecha de modificación).
-
-const DB_NAME = 'pd-metrics'
-const STORE = 'sidecars'
-const VERSION = 1
-
-let dbPromise = null
-
-function openDb() {
-  if (dbPromise) return dbPromise
-  dbPromise = new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, VERSION)
-    req.onupgradeneeded = () => {
-      const db = req.result
-      if (!db.objectStoreNames.contains(STORE)) db.createObjectStore(STORE)
-    }
-    req.onsuccess = () => resolve(req.result)
-    req.onerror = () => reject(req.error)
-  })
-  return dbPromise
-}
-
-// Identidad del master. lastModified + size distinguen dos archivos con el
-// mismo nombre, y detectan que el master fue regenerado (las métricas viejas
-// dejarían de corresponder).
-export function sidecarKey(file) {
-  return `${file.name}|${file.size}|${file.lastModified}`
-}
+// De un sitio y sólo uno: el sidecar HDF5 que scripts/compute_metrics.py deja
+// junto al master y que el dev server sirve desde la raíz del proyecto. Es un
+// archivo real en el directorio, así que no depende del navegador, del puerto
+// ni de que no se borren los datos del sitio.
+//
+// Antes existía además un caché en IndexedDB, necesario mientras el navegador
+// calculaba las métricas que faltaran. Ya no calcula: todo se precalcula antes
+// de arrancar, y un segundo origen de métricas sólo servía para servir valores
+// viejos cuando el sidecar cambiaba.
 
 export function sidecarName(masterName) {
   return `${masterName.replace(/\.(hdf5|h5|he5)$/i, '')}.metrics.h5`
 }
 
-// Sidecar generado por scripts/compute_metrics.py y servido por el dev server
-// desde la raíz del proyecto. Es la vía preferente: es un archivo real en el
-// directorio, así que no depende del navegador, del puerto ni de que no se
-// borren los datos del sitio, y funciona igual en cualquier navegador.
-// Devuelve null si no está (404) o si no hay servidor que lo sirva.
+// Devuelve null si el sidecar no está (404) o si no hay servidor que lo sirva.
 export async function fetchSidecar(masterName) {
   try {
     const res = await fetch(`/${encodeURIComponent(sidecarName(masterName))}`, {
@@ -56,42 +29,5 @@ export async function fetchSidecar(masterName) {
     return buf
   } catch (e) {
     return null
-  }
-}
-
-async function tx(mode, fn) {
-  const db = await openDb()
-  return new Promise((resolve, reject) => {
-    const t = db.transaction(STORE, mode)
-    const req = fn(t.objectStore(STORE))
-    req.onsuccess = () => resolve(req.result)
-    req.onerror = () => reject(req.error)
-  })
-}
-
-export async function loadSidecar(key) {
-  try {
-    const v = await tx('readonly', (s) => s.get(key))
-    return v || null
-  } catch (e) {
-    return null // sin IndexedDB (modo privado, cuota): se recalcula y ya
-  }
-}
-
-export async function saveSidecar(key, bytes) {
-  try {
-    await tx('readwrite', (s) => s.put(bytes, key))
-    return true
-  } catch (e) {
-    return false
-  }
-}
-
-export async function clearSidecar(key) {
-  try {
-    await tx('readwrite', (s) => s.delete(key))
-    return true
-  } catch (e) {
-    return false
   }
 }

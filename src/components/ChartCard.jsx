@@ -1,8 +1,10 @@
-import { useEffect, useRef } from 'react'
+import { useContext, useEffect, useRef } from 'react'
 import { Rnd } from 'react-rnd'
 import Plotly from 'plotly.js-dist-min'
+import { METRICS } from '../compute/metrics.js'
 import { getDataset } from '../state/datasetStore.js'
 import { publishAxis, subscribeAxis } from '../state/axisSync.js'
+import { CanvasViewContext } from './Canvas.jsx'
 import { snap } from '../constants.js'
 
 // Chart card: draggable + resizable (react-rnd), with a title bar. Data is read
@@ -12,7 +14,7 @@ import { snap } from '../constants.js'
 // A card holds a list of `series`, each { datasetId, xCol, yCol, name }. This is
 // what makes cards mergeable: dropping one card on another concatenates series.
 
-const PALETTE = [
+export const PALETTE = [
   '#4f9cff', '#ff7ac6', '#5fd68a', '#ffcf5f',
   '#b98cff', '#ff8f5f', '#4fd6d6', '#ff5f7a',
 ]
@@ -27,6 +29,125 @@ const THEME = {
 }
 
 const CONFIG = { displaylogo: false, responsive: false, scrollZoom: true }
+
+// A partir de cuántos puntos compensa WebGL.
+//
+// `scattergl` consume un contexto WebGL por gráfico y el navegador sólo mantiene
+// unos 8-16 vivos: al abrir el 17.º, tira el más antiguo y ese gráfico se queda
+// en blanco. Abrir señales a golpe de clic llegaba a ese techo enseguida y los
+// primeros gráficos del experimento se apagaban.
+//
+// Una señal son 3.000 (UHF) o 10.000 (AE) muestras dibujadas como UNA línea:
+// en SVG eso es un solo `path` y va sobrado. Los que de verdad necesitan WebGL
+// son los de métrica, que son cientos de miles de marcadores sueltos, y de esos
+// hay un número acotado (cuatro por experimento arrastrado).
+const GL_THRESHOLD = 20000
+
+// El scatter nace en modo selección, que es su gesto principal. El modebar se
+// deja tal cual —para scattergl ya trae rectángulo, lazo, zoom y pan—: añadir
+// botones a mano corre el riesgo de duplicar los que ya venían.
+const SELECT_CONFIG = { ...CONFIG, displayModeBar: true }
+
+// Columnas objetivo al decimar. El área de trazado de una tarjeta ronda los
+// 500 px, y cada columna aporta hasta dos puntos: son ~5 por píxel, margen de
+// sobra para que no se note ni al redimensionar la tarjeta.
+const DECIM_TARGET = 1200
+
+// Decimación min/max de un tramo [i0, i1).
+//
+// Por cada cubo se conservan el mínimo y el máximo, emitidos en el orden en que
+// aparecen para que la línea no retroceda. Eso preserva la envolvente exacta —
+// ningún pico desaparece, que es lo que sí pasaría muestreando uno de cada N— y
+// a una muestra por píxel el resultado es indistinguible del original.
+//
+// Sólo se aplica a trazas de línea. Una de marcadores (los gráficos de métrica)
+// no se decima nunca: ahí cada punto es una señal con la que se puede
+// interactuar, y quitar puntos rompería tanto el clic como la selección.
+function decimateMinMax(xs, ys, i0, i1, target = DECIM_TARGET) {
+  const n = i1 - i0
+  if (n <= target * 2) return { x: xs.subarray(i0, i1), y: ys.subarray(i0, i1) }
+
+  // +2: los extremos exactos del tramo. Un cubo aporta su mínimo y su máximo,
+  // que casi nunca son la primera ni la última muestra, así que sin esto la
+  // línea empezaba y acababa hasta un cubo por dentro del tramo. Son fracciones
+  // de píxel, pero una señal temporal tiene que verse entera.
+  const x = new Float64Array(target * 2 + 2)
+  const y = new Float64Array(target * 2 + 2)
+  let at = 0
+  x[at] = xs[i0]
+  y[at] = ys[i0]
+  at += 1
+
+  for (let b = 0; b < target; b += 1) {
+    const s = i0 + Math.floor((b * n) / target)
+    const e = i0 + Math.floor(((b + 1) * n) / target)
+    if (e <= s) continue
+    let lo = s
+    let hi = s
+    for (let i = s + 1; i < e; i += 1) {
+      if (ys[i] < ys[lo]) lo = i
+      else if (ys[i] > ys[hi]) hi = i
+    }
+    const first = Math.min(lo, hi)
+    const second = Math.max(lo, hi)
+    x[at] = xs[first]
+    y[at] = ys[first]
+    at += 1
+    if (second !== first) {
+      x[at] = xs[second]
+      y[at] = ys[second]
+      at += 1
+    }
+  }
+
+  x[at] = xs[i1 - 1]
+  y[at] = ys[i1 - 1]
+  at += 1
+  return { x: x.subarray(0, at), y: y.subarray(0, at) }
+}
+
+// Ventana de índices que cubre [x0, x1] en un eje ascendente, con un punto de
+// margen a cada lado para que la línea siga entrando y saliendo del borde.
+function rangeToIndices(xs, x0, x1) {
+  const search = (target) => {
+    let lo = 0
+    let hi = xs.length
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1
+      if (xs[mid] < target) lo = mid + 1
+      else hi = mid
+    }
+    return lo
+  }
+  const i0 = Math.max(0, search(x0) - 1)
+  const i1 = Math.min(xs.length, search(x1) + 1)
+  return [i0, i1]
+}
+
+// Aplica la máscara de señales descartadas a una serie.
+//
+// Devuelve además `keep`: el índice ORIGINAL de cada punto dibujado. Es
+// imprescindible — en cuanto se descarta algo, el `pointIndex` que reporta
+// Plotly es una posición dentro del array filtrado, no el número de señal. Sin
+// esta traducción, hacer clic tras un filtrado abriría otra señal, y descartar
+// una selección descartaría las equivocadas.
+function applyMask(xs, ys, mask) {
+  if (!mask || mask.size === 0) return { x: xs, y: ys, keep: null }
+  const n = Math.min(xs.length, ys.length)
+  const x = new Float64Array(n - mask.size > 0 ? n - mask.size : 0)
+  const y = new Float64Array(x.length)
+  const keep = new Int32Array(x.length)
+  let at = 0
+  for (let i = 0; i < n; i += 1) {
+    if (mask.has(i)) continue
+    if (at >= x.length) break
+    x[at] = xs[i]
+    y[at] = ys[i]
+    keep[at] = i
+    at += 1
+  }
+  return { x: x.subarray(0, at), y: y.subarray(0, at), keep: keep.subarray(0, at) }
+}
 
 function seriesSignature(series) {
   return series
@@ -73,6 +194,15 @@ function baseLayout(theme, xTitle, card) {
     layout.xaxis.range = [...card.xRange]
   }
 
+  // El scatter se usa sobre todo para seleccionar y descartar, así que ése es
+  // su gesto por defecto; zoom y lazo siguen en el modebar.
+  if (card.kind === 'metricScatter') {
+    layout.dragmode = 'select'
+    // Con una sola serie la leyenda sólo roba alto; fusionadas es lo único que
+    // dice de qué experimento es cada nube, ahora que se recolorean.
+    layout.showlegend = card.series.length > 1
+  }
+
   const yPrimary = card.series.find((s) => s.axis !== 'y2')
   if (yPrimary) {
     layout.yaxis.title = { text: yPrimary.name, font: { size: 10 } }
@@ -94,6 +224,26 @@ function baseLayout(theme, xTitle, card) {
   return layout
 }
 
+function MetricSelect({ axis, value, keys, onChange }) {
+  return (
+    <select
+      className="card-metric"
+      value={value || ''}
+      onMouseDown={(e) => e.stopPropagation()}
+      onChange={(e) => onChange?.(axis, e.target.value)}
+      title={`Métrica del eje ${axis.toUpperCase()}`}
+      aria-label={`Métrica del eje ${axis.toUpperCase()}`}
+    >
+      {keys.map((key) => (
+        <option key={key} value={key}>
+          {axis === 'x' ? 'X: ' : 'Y: '}
+          {METRICS[key]?.label || key}
+        </option>
+      ))}
+    </select>
+  )
+}
+
 export default function ChartCard({
   card,
   theme,
@@ -105,41 +255,173 @@ export default function ChartCard({
   onClose,
   onFocus,
   onContextMenu,
+  metricKeys = [],
+  masks = [],
+  maskSig = '',
+  onMetricChange,
+  onPointClick,
+  onSelectPoints,
+  onDropSelection,
+  onResetExclusion,
+  excludedCount = 0,
 }) {
+  const scale = useContext(CanvasViewContext)
   const plotRef = useRef(null)
   const drawnRef = useRef(false)
   const applyingRef = useRef(false) // evita el bucle al propagar el rango
   const sig = seriesSignature(card.series)
+
+  // Los handlers viven en refs: se registran una vez con el gráfico y no
+  // obligan a redibujar cada vez que App recrea la función.
+  const pointClickRef = useRef(onPointClick)
+  pointClickRef.current = onPointClick
+  const selectRef = useRef(onSelectPoints)
+  selectRef.current = onSelectPoints
+
+  // Máscaras y traducción de índices, leídas dentro del efecto. El efecto se
+  // vuelve a lanzar por `maskSig`, no por la identidad de estos arrays.
+  const masksRef = useRef(masks)
+  masksRef.current = masks
+  const keepRef = useRef([]) // por traza: índices originales de lo dibujado
+  const fullRef = useRef([]) // por traza: datos sin decimar, para re-decimar al hacer zoom
+
+  // Índice original de un punto: sin filtrado es él mismo; con filtrado, el que
+  // dice `keep`.
+  const originalIndex = (curve, i) => {
+    const keep = keepRef.current[curve]
+    if (!keep) return i
+    return i >= 0 && i < keep.length ? keep[i] : null
+  }
+
+  // Sólo los gráficos de métrica por señal: un punto es una señal, y hay a qué
+  // volver. En un gráfico de ambiental o de una señal suelta no significa nada.
+  const isMetricChart = !!card.sensor
+
+  // Los ejes son de la tarjeta y las series son lo que se compara en ellos, así
+  // que una fusionada conserva sus desplegables: cambiar una métrica reconstruye
+  // todas las series, cada una contra su propio experimento y sensor.
+  const canPickMetric = isMetricChart
+
+  // El scatter métrica-vs-métrica elige las dos, y es desde donde se filtra.
+  const isScatter = card.kind === 'metricScatter'
 
   // Initial draw / redraw when the set of series changes (e.g. after a merge).
   useEffect(() => {
     const el = plotRef.current
     if (!el || card.loading) return
 
+    const keeps = []
+    const fulls = []
     const traces = card.series.map((s, i) => {
       const ds = getDataset(s.datasetId)
       const color = s.color || PALETTE[i % PALETTE.length]
       const mode = s.mode || 'lines'
+      const { x, y, keep } = applyMask(
+        ds ? ds.data[s.xCol] : [],
+        ds ? ds.data[s.yCol] : [],
+        masksRef.current[i],
+      )
+      keeps[i] = keep
+
+      // Sólo líneas: en marcadores cada punto es una señal clicable.
+      const decimable = mode === 'lines' && x.length > DECIM_TARGET * 2
+      fulls[i] = decimable ? { x, y } : null
+      const drawn = decimable ? decimateMinMax(x, y, 0, x.length) : { x, y }
+
       return {
-        type: 'scattergl', // WebGL: handles hundreds of thousands of points
+        type: drawn.x.length > GL_THRESHOLD ? 'scattergl' : 'scatter',
         mode,
-        name: s.name,
-        x: ds ? ds.data[s.xCol] : [],
-        y: ds ? ds.data[s.yCol] : [],
+        // En la leyenda va el nombre largo (con el experimento); el título del
+        // eje se queda con `name`, que si no acabaría arrastrando la fecha.
+        name: s.legendName || s.name,
+        x: drawn.x,
+        y: drawn.y,
         yaxis: s.axis === 'y2' ? 'y2' : 'y',
         ...(mode.includes('lines') ? { line: { width: 1, color } } : {}),
         ...(mode.includes('markers') ? { marker: { size: 3, color } } : {}),
       }
     })
+    keepRef.current = keeps
+    fullRef.current = fulls
 
     const xTitle = card.series[0]?.xCol ?? ''
     let unsubscribe = () => {}
     let disposed = false
 
-    Plotly.react(el, traces, baseLayout(theme, xTitle, card), CONFIG).then(() => {
+    // Rectángulo y lazo sólo en el scatter: es el gráfico desde el que se
+    // filtra, y es donde hay un botón para aplicar lo seleccionado.
+    const config = isScatter ? SELECT_CONFIG : CONFIG
+    Plotly.react(el, traces, baseLayout(theme, xTitle, card), config).then(() => {
       if (disposed) return
       drawnRef.current = true
       Plotly.Plots.resize(el)
+
+      // Clic en un punto => la señal que hay detrás. El índice dibujado se
+      // traduce al número de señal en el experimento, que es con el que se
+      // escribieron el sidecar y los timestamps.
+      if (isMetricChart) {
+        el.on('plotly_click', (ev) => {
+          const pt = ev?.points?.[0]
+          // scattergl reporta `pointNumber`; scatter, ambos. El índice es
+          // relativo a su traza, así que va con `curveNumber`: en una tarjeta
+          // fusionada, la serie clicada puede ser de otro sensor que el resto.
+          const i = pt?.pointIndex ?? pt?.pointNumber
+          if (typeof i !== 'number') return
+          const curve = pt.curveNumber ?? 0
+          const original = originalIndex(curve, i)
+          if (original === null) return
+          pointClickRef.current?.(original, curve)
+        })
+
+        // Rectángulo o lazo. Se acumulan por traza porque una selección puede
+        // cruzar series de sensores distintos en una tarjeta fusionada, y cada
+        // una se descarta contra su propio sensor.
+        if (isScatter) {
+          el.on('plotly_selected', (ev) => {
+            if (!ev?.points) return
+            const byCurve = new Map()
+            for (const pt of ev.points) {
+              const i = pt.pointIndex ?? pt.pointNumber
+              if (typeof i !== 'number') continue
+              const curve = pt.curveNumber ?? 0
+              const original = originalIndex(curve, i)
+              if (original === null) continue
+              if (!byCurve.has(curve)) byCurve.set(curve, [])
+              byCurve.get(curve).push(original)
+            }
+            selectRef.current?.(byCurve)
+          })
+
+          el.on('plotly_deselect', () => selectRef.current?.(new Map()))
+        }
+      }
+
+      // Al acercarse, se vuelve a decimar sólo el tramo visible: los cubos se
+      // reparten sobre menos muestras, así que aparece el detalle que la vista
+      // completa no podía mostrar. Sin esto, decimar sería perder resolución
+      // para siempre en vez de sólo mientras no hace falta.
+      if (fullRef.current.some(Boolean)) {
+        el.on('plotly_relayout', (ev) => {
+          if (!drawnRef.current) return
+          const auto = ev['xaxis.autorange']
+          const x0 = ev['xaxis.range[0]']
+          if (!auto && x0 === undefined) return // mover, redimensionar, etc.
+
+          const updates = { x: [], y: [] }
+          const indices = []
+          fullRef.current.forEach((full, i) => {
+            if (!full) return
+            const [i0, i1] = auto
+              ? [0, full.x.length]
+              : rangeToIndices(full.x, x0, ev['xaxis.range[1]'])
+            const d = decimateMinMax(full.x, full.y, i0, i1)
+            updates.x.push(d.x)
+            updates.y.push(d.y)
+            indices.push(i)
+          })
+          if (indices.length > 0) Plotly.restyle(el, updates, indices)
+        })
+      }
 
       // Eje de tiempo compartido con el resto del grupo. El flag `applying`
       // corta el bucle: aplicar un rango recibido dispara otro plotly_relayout.
@@ -174,7 +456,7 @@ export default function ChartCard({
       drawnRef.current = false
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sig, card.loading, card.groupId])
+  }, [sig, card.loading, card.groupId, isMetricChart, isScatter, maskSig])
 
   // Restyle colors when the theme changes (no full redraw needed).
   useEffect(() => {
@@ -213,7 +495,10 @@ export default function ChartCard({
       className="card"
       size={{ width: card.width, height: card.height }}
       position={{ x: card.x, y: card.y }}
-      bounds="parent"
+      // Sin `bounds`: el lienzo no tiene bordes y una tarjeta puede vivir en
+      // coordenadas negativas. `scale` es lo que hace que arrastrar con zoom
+      // mueva la tarjeta lo que se ve, y no el doble.
+      scale={scale}
       minWidth={288}
       minHeight={192}
       dragHandleClassName="card-title"
@@ -233,7 +518,9 @@ export default function ChartCard({
       }
     >
       <div
-        className={`card-inner${isMergeTarget ? ' merge-target' : ''}`}
+        className={`card-inner${isMergeTarget ? ' merge-target' : ''}${
+          isMetricChart ? ' card-metric-chart' : ''
+        }`}
         onContextMenu={(e) => {
           e.preventDefault()
           e.stopPropagation()
@@ -242,11 +529,53 @@ export default function ChartCard({
         }}
       >
         <div className="card-title">
+          {/* Las 12 métricas ya están en el sidecar, así que cambiar un eje es
+              leer otra columna: ni recalcula ni toca el master. */}
+          {canPickMetric && isScatter && (
+            <MetricSelect
+              axis="x"
+              value={card.xMetric}
+              keys={metricKeys}
+              onChange={onMetricChange}
+            />
+          )}
+          {canPickMetric && (
+            <MetricSelect
+              axis="y"
+              value={isScatter ? card.yMetric : card.metricKey}
+              keys={metricKeys}
+              onChange={onMetricChange}
+            />
+          )}
+
+          {isScatter && !card.loading && (
+            <>
+              <button
+                className="card-drop"
+                onMouseDown={(e) => e.stopPropagation()}
+                onClick={onDropSelection}
+                title="Descartar la selección en todas las métricas de este sensor"
+              >
+                ✂ quitar
+              </button>
+              <button
+                className="card-reset"
+                onMouseDown={(e) => e.stopPropagation()}
+                onClick={onResetExclusion}
+                disabled={excludedCount === 0}
+                title="Devolver todas las señales descartadas"
+              >
+                ↺
+              </button>
+            </>
+          )}
+
           <span className="card-meta">
             {card.loading
               ? card.title || 'loading…'
               : `${card.series.length} ${card.series.length === 1 ? 'signal' : 'signals'}` +
-                (nPoints ? ` · ${nPoints.toLocaleString()} pts` : '')}
+                (nPoints ? ` · ${nPoints.toLocaleString()} pts` : '') +
+                (excludedCount ? ` · −${excludedCount.toLocaleString()}` : '')}
           </span>
           {!card.loading && card.series.length > 1 && (
             <button
