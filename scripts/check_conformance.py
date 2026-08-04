@@ -50,7 +50,7 @@ def main():
     width = max(len(k) for k in keys)
     for key in keys:
         limit = TOL_BY_KEY.get(key, TOL)
-        mark = "✓" if worst[key] <= limit else "✗"
+        mark = "OK" if worst[key] <= limit else "ERR"
         print(f"  {mark} {key:<{width}}  desviación máx {worst[key]:.2e}  (límite {limit:.0e})")
 
     if failures:

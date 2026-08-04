@@ -195,7 +195,7 @@ export default function App() {
         const target = prev.find((c) => c.id === targetId)
         if (!target) return prev.map((c) => (c.id === id ? moved : c))
 
-        const mergedSeries = [...target.series, ...moved.series]
+        const mergedSeries = [...target.series, ...moved.series].map(s => ({ ...s, color: undefined }))
         const mergedTitle = mergedSeries.map((s) => s.name).join(' + ')
         return prev
           .filter((c) => c.id !== id)
@@ -464,30 +464,37 @@ export default function App() {
   // Métricas por sensor. El valor sale del sidecar ya calculado — el frontend no
   // computa métricas — y el eje X de los timestamps del master, que el
   // sidecar no guarda.
-  const buildMetricChart = useCallback(async (test, sensor, metricKey, t0, color) => {
+  const buildMetricChart = useCallback(async (test, sensor, metricKey, t0, color, usePercent = false) => {
     if (!metrics?.bytes) throw new Error('sin métricas: ejecuta npm run metrics')
 
-    const [m, ts] = await Promise.all([
+    const [m, pct, ts] = await Promise.all([
       hdf5.readMetric(test, sensor, metricKey, metrics.bytes),
-      hdf5.readTimestamps(test, sensor),
+      usePercent ? hdf5.readMetric(test, sensor, 't_pct', metrics.bytes) : Promise.resolve(null),
+      usePercent ? Promise.resolve(null) : hdf5.readTimestamps(test, sensor),
     ])
-    const n = Math.min(m.n, ts.n)
+
+    const n = Math.min(m.n, usePercent ? pct.n : ts.n)
     const xs = new Float64Array(n)
-    for (let i = 0; i < n; i += 1) xs[i] = ts.values[i] - t0
+    if (usePercent) {
+      for (let i = 0; i < n; i += 1) xs[i] = pct.values[i]
+    } else {
+      for (let i = 0; i < n; i += 1) xs[i] = ts.values[i] - t0
+    }
 
     const metricLabel = METRICS[metricKey]?.label || metricKey
     const ycol = `${metricLabel} · ${sensor.toUpperCase()}`
+    const xcol = usePercent ? 'Time (%)' : XCOL
     const id = nextDatasetId()
     putDataset({
       id,
       name: `${sensor.toUpperCase()} ${metricLabel} - ${test}`,
-      columns: [XCOL, ycol],
+      columns: [xcol, ycol],
       rowCount: n,
-      data: { [XCOL]: xs, [ycol]: m.values.subarray(0, n) },
+      data: { [xcol]: xs, [ycol]: m.values.subarray(0, n) },
       meta: { test, sensor, metricKey, fromSidecar: true },
     })
 
-    return [{ datasetId: id, xCol: XCOL, yCol: ycol, name: ycol, color, mode: 'markers' }]
+    return [{ datasetId: id, xCol: xcol, yCol: ycol, name: ycol, color, mode: 'markers' }]
   }, [metrics])
 
   // Los tres gráficos del experimento, en orden de apilado. La clave es el
@@ -621,8 +628,8 @@ export default function App() {
 
     try {
       const info = await hdf5.experimentT0(test)
-      const series = await buildMetricChart(test, sensor, metricKey, info.t0, color)
-      patchCard(id, { loading: false, xRange: [0, info.durationS], series })
+      const series = await buildMetricChart(test, sensor, metricKey, info.t0, color, true)
+      patchCard(id, { loading: false, xRange: [0, 100], series })
     } catch (err) {
       patchCard(id, { loading: false, error: err?.message || 'failed' })
     }

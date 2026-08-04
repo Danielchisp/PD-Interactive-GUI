@@ -103,7 +103,7 @@ class ProgressBar:
             elapsed = time.monotonic() - self.t0
             sys.stderr.write(
                 f"\r{' ' * (self.width - 1)}\r"
-                f"  ✓ {self.done:,} señales en {hms(elapsed)}"
+                f"  OK {self.done:,} señales en {hms(elapsed)}"
                 f" ({self.done / max(elapsed, 1e-9) / 1000:.1f}k sig/s)\n"
             )
             sys.stderr.flush()
@@ -252,7 +252,7 @@ def compute_file(master: Path, state, jobs):
     bar.close()
 
     out_path = sidecar_path(master)
-    with h5py.File(out_path, "a") as out:
+    with h5py.File(out_path, "a") as out, h5py.File(master, "r") as master_f:
         out.attrs["schema"] = SCHEMA
         out.attrs["metrics"] = ",".join(METRIC_KEYS)
         for g in pending:
@@ -271,7 +271,21 @@ def compute_file(master: Path, state, jobs):
                 if name in UNITS:
                     ds.attrs["unit"] = UNITS[name]
 
-    print(f"  → {out_path.name}  ({human(out_path.stat().st_size)})")
+            if "t_pct" in grp:
+                del grp["t_pct"]
+            ts = master_f[g["test"]][g["sensor"]]["timestamps"][:]
+            if len(ts) > 0:
+                t0 = ts[0]
+                t_end = ts[-1]
+                duration = t_end - t0
+                t_pct = np.zeros_like(ts, dtype="<f8") if duration == 0 else (ts - t0) / duration * 100.0
+                ds_pct = grp.create_dataset(
+                    "t_pct", data=t_pct, dtype="<f8",
+                    chunks=(min(g["n_signals"], 8192),), compression="gzip",
+                )
+                ds_pct.attrs["unit"] = "%"
+
+    print(f"  -> {out_path.name}  ({human(out_path.stat().st_size)})")
     return len(pending)
 
 
@@ -297,7 +311,7 @@ def choose(candidates):
     print("\nArchivos HDF5 encontrados:\n")
     for i, (master, state) in enumerate(candidates, 1):
         size = human(master.stat().st_size)
-        mark = " " if state["pending"] else "✓"
+        mark = " " if state["pending"] else "OK"
         print(f"  {mark} {i}) {master.name}")
         print(f"       {size:>9}   {describe(master, state)}")
 

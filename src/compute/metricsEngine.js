@@ -188,6 +188,30 @@ export function createMetricsEngine({ h5wasm, FS, sidecarPath }) {
           if (unit) ds.create_attribute('unit', unit, [])
         })
 
+        if (!have.includes('t_pct')) {
+          const tsDset = h5file.get(`${g.test}/${g.sensor}/timestamps`)
+          if (tsDset && tsDset.shape && tsDset.shape[0] > 0) {
+            const ts = tsDset.value
+            const t0 = ts[0]
+            const tEnd = ts[ts.length - 1]
+            const duration = tEnd - t0
+            const tPct = new Float64Array(ts.length)
+            if (duration > 0) {
+              for (let i = 0; i < ts.length; i++) {
+                tPct[i] = ((ts[i] - t0) / duration) * 100.0
+              }
+            }
+            const dsPct = sensorGroup.create_dataset({
+              name: 't_pct',
+              data: tPct,
+              shape: [g.nSignals],
+              chunks: [Math.min(g.nSignals, 8192)],
+              compression: 'gzip',
+            })
+            dsPct.create_attribute('unit', '%', [])
+          }
+        }
+
         out.flush()
       }
 
