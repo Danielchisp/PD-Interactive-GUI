@@ -44,6 +44,8 @@ export const hdf5 = {
   testChildren: (test) => call('testChildren', { test }),
   chunks: (test) => call('chunks', { test }),
   readSignal: (test, path, row, datasetName) => call('readSignal', { test, path, row, datasetName }),
+  // Señal nº `index` contando el experimento entero, no el chunk.
+  readSignalAt: (test, sensor, index) => call('readSignalAt', { test, sensor, index }),
   readHumidity: (test) => call('readHumidity', { test }),
   readGroupSummary: (test, path) => call('readGroupSummary', { test, path }),
   readGroupMatrix: (test, path) => call('readGroupSummary', { test, path }),
@@ -53,9 +55,8 @@ export const hdf5 = {
   experimentT0: (test) => call('experimentT0', { test }),
 
   // --- Métricas -------------------------------------------------------------
+  // Sólo lectura: las calcula scripts/compute_metrics.py antes de arrancar.
   metricsPlan: (sidecarBytes) => call('metricsPlan', { sidecarBytes }),
-  metricsRun: (sidecarBytes, onProgress) =>
-    call('metricsRun', { sidecarBytes }, [], onProgress),
   readMetric: (test, sensor, key, sidecarBytes) =>
     call('readMetric', { test, sensor, key, sidecarBytes }),
 }

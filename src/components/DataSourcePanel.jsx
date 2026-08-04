@@ -1,7 +1,7 @@
-import { useCallback, useRef, useState } from 'react'
+import { useCallback, useContext, useState } from 'react'
 import { Rnd } from 'react-rnd'
 import { hdf5 } from '../hdf5/hdf5Client.js'
-import { METRICS } from '../compute/metrics.js'
+import { CanvasViewContext } from './Canvas.jsx'
 import { snap } from '../constants.js'
 
 // Source object on the canvas: the open HDF5 becomes a browsable panel.
@@ -48,13 +48,23 @@ function formatDuration(seconds) {
   return `${s}s`
 }
 
-export default function DataSourcePanel({ source, geom, onChange, onClose, onFocus }) {
+export default function DataSourcePanel({
+  source,
+  geom,
+  onChange,
+  onClose,
+  onFocus,
+  plottedTests = new Set(),
+  editedGroups = new Map(),
+}) {
+  const scale = useContext(CanvasViewContext)
+
   return (
     <Rnd
       className="card"
       size={{ width: geom.width, height: geom.height }}
       position={{ x: geom.x, y: geom.y }}
-      bounds="parent"
+      scale={scale}
       minWidth={256}
       minHeight={224}
       dragHandleClassName="ds-title"
@@ -78,7 +88,10 @@ export default function DataSourcePanel({ source, geom, onChange, onClose, onFoc
           <span className="card-name" title={source.fileName}>
             {source.fileName}
           </span>
-          <span className="card-meta">{source.tests.length} tests</span>
+          <span className="card-meta">
+            {source.tests.length} tests
+            {plottedTests.size > 0 && ` · ${plottedTests.size} on canvas`}
+          </span>
           <button
             className="card-close"
             onMouseDown={(e) => e.stopPropagation()}
@@ -90,7 +103,12 @@ export default function DataSourcePanel({ source, geom, onChange, onClose, onFoc
         </div>
         <div className="ds-tree">
           {source.tests.map((t) => (
-            <TestNode key={t.name} test={t} />
+            <TestNode
+              key={t.name}
+              test={t}
+              plotted={plottedTests.has(t.name)}
+              editedGroups={editedGroups}
+            />
           ))}
         </div>
       </div>
@@ -98,7 +116,7 @@ export default function DataSourcePanel({ source, geom, onChange, onClose, onFoc
   )
 }
 
-function TestNode({ test }) {
+function TestNode({ test, plotted = false, editedGroups = new Map() }) {
   const [open, setOpen] = useState(false)
   const [children, setChildren] = useState(null)
   const [loading, setLoading] = useState(false)
@@ -119,11 +137,19 @@ function TestNode({ test }) {
 
   const shortDate = test.date.replace('Test - ', '').replace(/Z$/, '')
 
+  // Cuántas señales lleva descartadas este experimento en total. El árbol nace
+  // plegado, así que sin esto el aviso del grupo quedaría escondido justo
+  // cuando importa: al volver a un experimento que ya se tocó.
+  let editedTotal = 0
+  for (const [key, n] of editedGroups) {
+    if (key.startsWith(`${test.name}|`)) editedTotal += n
+  }
+
   return (
     <div className="ds-node">
       {/* Arrastrar el experimento entero genera los tres gráficos alineados */}
       <button
-        className="ds-row ds-test"
+        className={`ds-row ds-test${plotted ? ' ds-plotted' : ''}`}
         onClick={toggle}
         draggable
         onDragStart={(e) => {
@@ -139,13 +165,22 @@ function TestNode({ test }) {
         <span className="ds-label" title={test.name}>
           {shortDate}
         </span>
+        {editedTotal > 0 && <EditedMark count={editedTotal} scope="this experiment" />}
+        {plotted && (
+          <span className="ds-plotted-dot" title="Plotted on the canvas" aria-label="plotted" />
+        )}
       </button>
       {open && (
         <div className="ds-children">
           {loading && <div className="ds-hint">loading structure…</div>}
           {children &&
             sortGroups(children).map((item) => (
-              <ChildGroupNode key={item.name} testName={test.name} item={item} />
+              <ChildGroupNode
+                key={item.name}
+                testName={test.name}
+                item={item}
+                edited={editedGroups.get(`${test.name}|${item.name}`) ?? 0}
+              />
             ))}
         </div>
       )}
@@ -153,7 +188,7 @@ function TestNode({ test }) {
   )
 }
 
-function ChildGroupNode({ testName, item }) {
+function ChildGroupNode({ testName, item, edited = 0 }) {
   const [open, setOpen] = useState(false)
 
   const toggle = useCallback(() => {
@@ -162,7 +197,6 @@ function ChildGroupNode({ testName, item }) {
 
   // Con nSignals > 0 (p.ej. AE con 12103 o UHF con 89) se lista cada señal.
   const isSignalMatrix = item.nSignals > 0
-  const isHumidityGroup = item.name === 'humidity'
   const groupLabel = groupLabelFor(item.name)
   const duration = formatDuration(item.durationS)
 
@@ -186,32 +220,20 @@ function ChildGroupNode({ testName, item }) {
 
   return (
     <div className="ds-node">
-      <div
-        className="ds-row ds-chunk"
-        style={{ cursor: 'grab', display: 'flex', alignItems: 'center' }}
-        {...draggableProps}
-      >
+      {/* La fila es arrastrable y además despliega, así que el botón va dentro.
+          Todo el estilo vive en la hoja: en línea se desviaba de .ds-row y los
+          grupos acababan con otra tipografía que el resto del árbol. */}
+      <div className="ds-row ds-chunk" {...draggableProps}>
         <button
+          className="ds-toggle"
           onClick={(e) => {
             e.stopPropagation()
             toggle()
           }}
-          style={{
-            background: 'none',
-            border: 'none',
-            color: 'inherit',
-            display: 'flex',
-            alignItems: 'center',
-            cursor: 'pointer',
-            padding: 0,
-            flex: 1,
-            textAlign: 'left',
-          }}
         >
           <Caret open={open} />
-          <span className="ds-label" style={{ fontWeight: 'bold' }}>
-            {groupLabel}
-          </span>
+          <span className="ds-label">{groupLabel}</span>
+          {edited > 0 && <EditedMark count={edited} scope="this group" />}
           {duration && <span className="ds-count">{duration}</span>}
         </button>
       </div>
@@ -320,6 +342,22 @@ function SignalList({ testName, path, label: groupLabel, count }) {
     >
       <div style={{ height: total, position: 'relative' }}>{rows}</div>
     </div>
+  )
+}
+
+// Marca de "editado en esta sesión". El HDF5 se abre en sólo lectura y no se
+// toca nunca: esto es un recorte que vive en memoria y se pierde al recargar.
+// El texto lo dice, para que nadie crea que el archivo cambió.
+function EditedMark({ count, scope }) {
+  const label = `${count.toLocaleString()} ${count === 1 ? 'signal dropped' : 'signals dropped'}`
+  return (
+    <span
+      className="ds-edited"
+      title={`${label} in ${scope}, this session only — the file is never modified`}
+      aria-label={label}
+    >
+      ✂
+    </span>
   )
 }
 

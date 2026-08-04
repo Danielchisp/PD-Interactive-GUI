@@ -1,0 +1,13 @@
+{
+  "_comment": [
+    "Frecuencia de muestreo, en Hz, para los grupos cuyo HDF5 no declara",
+    "fs_<sensor> en el grupo de experimento (el layout chunks-v2 no lo escribe).",
+    "Lo que declare el archivo siempre manda sobre esto. Un sensor en null se",
+    "omite del calculo en vez de asumir una tasa: risetime, teq y energia_j",
+    "dependen de ella. Se puede pisar por corrida con --fs-uhf / --fs-ae."
+  ],
+  "fs": {
+    "uhf": 3e9,
+    "ae": 100e3
+  }
+}

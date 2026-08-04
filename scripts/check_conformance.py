@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Comprueba que pd_metrics.py (Python) coincide con metrics.js (JS).
 
-Hay dos implementaciones de las mismas 12 métricas —una corre en el navegador
-y otra en el CLI— y tienen que dar lo mismo, o un modelo entrenado con features
-del CLI se comportará distinto con las del navegador.
+Hay dos implementaciones de las mismas 12 métricas y tienen que dar lo mismo.
+Desde que las métricas se precalculan, la que produce los sidecars es siempre
+pd_metrics.py; metrics.js queda como segunda opinión independiente, que es
+justamente lo que hace útil esta comprobación (ya cazó un bug real en shannon).
 
 El archivo dorado lo genera el lado JS:  node scripts/make_golden.mjs
 Aquí sólo se verifica:                   python3 scripts/check_conformance.py
@@ -14,6 +15,12 @@ import sys
 from pathlib import Path
 
 import numpy as np
+
+# Igual que en compute_metrics.py: la consola de Windows es cp1252 y ✓/⚠ la
+# hacen reventar con UnicodeEncodeError.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from pd_metrics import compute_batch  # noqa: E402
