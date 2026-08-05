@@ -2,7 +2,15 @@ import { useContext, useEffect, useRef, useState } from 'react'
 import { Rnd } from 'react-rnd'
 import Plotly from 'plotly.js-dist-min'
 import { METRICS } from '../compute/metrics.js'
-import { DEFAULT_SMOOTHING, SMOOTHING, trendCurve, trendParams } from '../compute/trend.js'
+import {
+  CELLS_MAX,
+  CELLS_MIN,
+  DEFAULT_SMOOTHING,
+  SMOOTHING,
+  smoothingCells,
+  trendCurve,
+  trendParams,
+} from '../compute/trend.js'
 import { getDataset } from '../state/datasetStore.js'
 import { publishAxis, subscribeAxis } from '../state/axisSync.js'
 import { CanvasViewContext } from './Canvas.jsx'
@@ -397,7 +405,16 @@ export default function ChartCard({
   // significa nada.
   const canTrend = card.species === 'metric'
   const trendOn = canTrend && !!card.trend
-  const smoothing = card.trend?.smoothing || DEFAULT_SMOOTHING
+  const smoothing = card.trend?.smoothing ?? DEFAULT_SMOOTHING
+  const cells = smoothingCells(smoothing)
+
+  // El suavizado se lee desde una ref dentro del efecto de dibujo, no desde su
+  // clausura. Así moverlo NO está en las dependencias del efecto: cambiarlo
+  // recalcula la curva y hace un restyle, en lugar de reconstruir el gráfico
+  // entero — que es lo que haría inservible un deslizador en vivo.
+  const smoothingRef = useRef(smoothing)
+  smoothingRef.current = smoothing
+  const retrendRef = useRef(null) // rehace la tendencia sobre el último rango
 
   // Initial draw / redraw when the set of series changes (e.g. after a merge).
   useEffect(() => {
@@ -479,16 +496,19 @@ export default function ChartCard({
     }
     if (!Number.isFinite(fullSpan[0])) fullSpan = [0, 0]
 
-    // Recalcula la tendencia para el tramo visible. Esto es lo que la hace
-    // adaptativa: tau sale del span que se ve, así que al acercarse la curva
-    // deja de promediar lo que ya no está en pantalla y aparece el detalle que
-    // la vista completa no podía mostrar. Son tres pasadas O(n) — unos pocos ms
-    // en el peor caso real—, así que va en el hilo principal sin worker.
+    // Recalcula la tendencia para el tramo visible. Se recalcula al hacer zoom
+    // sólo para volver a muestrear la rejilla dentro de lo que se ve; el
+    // suavizado se mide siempre contra el span COMPLETO de los datos, así que
+    // la curva es la misma esté como esté el eje y acercarse la amplía en lugar
+    // de cambiarla. Son tres pasadas O(n) — unos pocos ms en el peor caso
+    // real—, así que va en el hilo principal sin worker.
+    let lastRange = null
     const applyTrend = (x0, x1) => {
       if (!trendOn || disposed) return
       const from = x0 ?? fullSpan[0]
       const to = x1 ?? fullSpan[1]
-      const params = trendParams(from, to, smoothing)
+      lastRange = [from, to]
+      const params = trendParams(from, to, smoothingRef.current, fullSpan[1] - fullSpan[0])
       const ys = []
       const xsOut = []
       const indices = []
@@ -518,6 +538,7 @@ export default function ChartCard({
       // lo hay (los del bloque de experimento lo traen), y si no sobre el span
       // completo de los datos.
       applyTrend(card.xRange?.[0], card.xRange?.[1])
+      retrendRef.current = () => applyTrend(lastRange?.[0], lastRange?.[1])
       if (trendOn) {
         el.on('plotly_relayout', (ev) => {
           if (!drawnRef.current) return
@@ -624,11 +645,19 @@ export default function ChartCard({
     return () => {
       disposed = true
       unsubscribe()
+      retrendRef.current = null
       Plotly.purge(el) // se lleva también los listeners de plotly
       drawnRef.current = false
     }
+    // `smoothing` NO va aquí a propósito: se lee por ref y se aplica con el
+    // efecto de abajo, sin reconstruir.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sig, card.loading, card.groupId, isMetricChart, canSelect, maskSig, trendOn, smoothing, glRatio])
+  }, [sig, card.loading, card.groupId, isMetricChart, canSelect, maskSig, trendOn, glRatio])
+
+  // Cambiar el suavizado: sólo la curva, sin tocar el resto del gráfico.
+  useEffect(() => {
+    if (drawnRef.current) retrendRef.current?.()
+  }, [smoothing])
 
   // Keep Plotly filling the container as the card is resized (live).
   useEffect(() => {
@@ -724,20 +753,45 @@ export default function ChartCard({
                 ∿ trend
               </button>
               {trendOn && (
-                <select
-                  className="card-metric"
-                  value={smoothing}
-                  onMouseDown={(e) => e.stopPropagation()}
-                  onChange={(e) => onSmoothingChange?.(e.target.value)}
-                  title="Trend smoothing"
-                  aria-label="Trend smoothing"
-                >
-                  {Object.entries(SMOOTHING).map(([key, { label }]) => (
-                    <option key={key} value={key}>
-                      {label}
-                    </option>
-                  ))}
-                </select>
+                <>
+                  <select
+                    className="card-metric"
+                    value={typeof smoothing === 'number' ? 'custom' : smoothing}
+                    onMouseDown={(e) => e.stopPropagation()}
+                    onChange={(e) => onSmoothingChange?.(e.target.value)}
+                    title="Trend smoothing"
+                    aria-label="Trend smoothing"
+                  >
+                    {Object.entries(SMOOTHING).map(([key, { label }]) => (
+                      <option key={key} value={key}>
+                        {label}
+                      </option>
+                    ))}
+                    {typeof smoothing === 'number' && (
+                      <option value="custom" disabled>
+                        custom
+                      </option>
+                    )}
+                  </select>
+                  {/* Ajuste fino en vivo. En escala logarítmica porque lo que
+                      importa es el factor, no la diferencia: de 40 a 60 celdas
+                      se ve tanto como de 400 a 600. */}
+                  <input
+                    className="card-cells"
+                    type="range"
+                    min={Math.round(Math.log2(CELLS_MIN) * 100)}
+                    max={Math.round(Math.log2(CELLS_MAX) * 100)}
+                    step={1}
+                    value={Math.round(Math.log2(cells) * 100)}
+                    onMouseDown={(e) => e.stopPropagation()}
+                    onChange={(e) => {
+                      onSmoothingChange?.(Math.round(2 ** (Number(e.target.value) / 100)))
+                    }}
+                    title="Trend detail: cells across the full run"
+                    aria-label="Trend detail in cells"
+                  />
+                  <span className="card-meta">{cells} cells</span>
+                </>
               )}
             </>
           )}

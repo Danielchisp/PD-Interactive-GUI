@@ -342,6 +342,15 @@ body {
   color: #000;
 }
 
+/* Ajuste fino de la tendencia. Provisional: es para calibrar el suavizado
+   contra los datos de verdad, no un control definitivo de la tarjeta. */
+.card-cells {
+  width: 90px;
+  flex: none;
+  accent-color: var(--accent);
+  cursor: ew-resize;
+}
+
 .card-plot {
   flex: 1;
   min-height: 0;

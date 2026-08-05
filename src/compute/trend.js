@@ -54,24 +54,72 @@ const BREAK_SUPPORT = 0.5
 // tras un grupo se vea como una curva y no como un escalón.
 const GRID_PER_CELL = 4
 
-// Cada nivel parte el tramo visible en `cells` celdas: tau = span / cells. Más
-// celdas es una tau más corta y una curva que sigue más de cerca.
+// Suelo y techo de puntos de rejilla por tramo dibujado.
+//
+// Con tau fija, un zoom profundo pediría cuatro o cinco puntos para el tramo
+// visible: la curva es suave a esa escala, pero los cortes por falta de soporte
+// caerían en saltos de rejilla enormes y se verían como escalones. El suelo
+// mantiene la línea trazada con la misma finura a cualquier acercamiento.
+//
+// El techo es lo que se dibuja, no lo que se calcula: la traza de tendencia es
+// SVG y pasado este orden de magnitud el gráfico se arrastra al hacer zoom. Por
+// encima de GRID_MAX/GRID_PER_CELL celdas la rejilla deja de afinarse al ritmo
+// de tau y la curva se muestrea algo más basta que tau/4 — la forma sigue
+// siendo la misma, sólo se traza con menos vértices.
+const GRID_MIN = 128
+const GRID_MAX = 30000
+
+// Cada nivel parte el span DE REFERENCIA en `cells` celdas: tau = span / cells.
+// Más celdas es una tau más corta y una curva que sigue más de cerca.
 export const SMOOTHING = {
-  soft: { label: 'smooth', cells: 20 },
-  medium: { label: 'medium', cells: 60 },
-  hard: { label: 'detailed', cells: 150 },
-  fine: { label: 'fine', cells: 400 },
+  soft: { label: 'smooth', cells: 100 },
+  medium: { label: 'medium', cells: 200 },
+  hard: { label: 'detailed', cells: 400 },
+  fine: { label: 'fine', cells: 800 },
 }
 
-export const DEFAULT_SMOOTHING = 'medium'
+export const DEFAULT_SMOOTHING = 'hard'
 
-// Parámetros para un tramo visible. Es lo que hace la tendencia adaptativa: al
-// acercarse, el span encoge, tau encoge con él y aparece detalle que la vista
-// completa no podía mostrar.
-export function trendParams(from, to, smoothing = DEFAULT_SMOOTHING) {
-  const s = SMOOTHING[smoothing] || SMOOTHING[DEFAULT_SMOOTHING]
-  const span = Math.max(0, to - from)
-  return { tau: span > 0 ? span / s.cells : 0, from, to, cells: s.cells }
+// Límites del ajuste manual (el deslizador de la tarjeta). Por debajo de
+// CELLS_MIN la curva es una recta.
+//
+// El tope de arriba no es un límite de la matemática sino de dónde deja de
+// haber tendencia que estimar: el límite de verdad lo pone la densidad de
+// descargas. Cuando tau baja de unas quince descargas de ancho, la atenuación
+// por soporte (FULL_SUPPORT) empieza a hundir la curva hacia cero, porque a esa
+// escala ya no hay con qué respaldar un nivel — cada punto es su propio suceso.
+// Con muchas descargas por segundo eso queda muy arriba y estos 20.000 se
+// quedan cortos; en un ensayo escaso se nota mucho antes de llegar al tope.
+export const CELLS_MIN = 20
+export const CELLS_MAX = 20000
+
+// Celdas de un nivel, sea un preajuste ('hard') o un número puesto a mano.
+export function smoothingCells(smoothing = DEFAULT_SMOOTHING) {
+  if (typeof smoothing === 'number' && smoothing > 0) {
+    return Math.min(CELLS_MAX, Math.max(CELLS_MIN, smoothing))
+  }
+  return (SMOOTHING[smoothing] || SMOOTHING[DEFAULT_SMOOTHING]).cells
+}
+
+/**
+ * Parámetros para dibujar la tendencia en [from, to].
+ *
+ * `refSpan` es el span contra el que se mide el suavizado —el del experimento
+ * entero, no el que se ve—, y por eso tau NO cambia al hacer zoom: acercarse
+ * amplía la misma curva en lugar de recalcular otra más fina. Atarla al tramo
+ * visible parecía dar detalle adaptativo, pero significaba que el nivel elegido
+ * no describía nada estable: la misma opción daba una curva plana en la vista
+ * completa y otra llena de rizo al acercarse, y el detalle que se veía era un
+ * artefacto del zoom, no de los datos. Sin `refSpan` se cae al tramo visible,
+ * que es el comportamiento correcto cuando es todo lo que hay.
+ *
+ * `smoothing` es la clave de un preajuste o, si se está ajustando a mano, el
+ * número de celdas directamente.
+ */
+export function trendParams(from, to, smoothing = DEFAULT_SMOOTHING, refSpan) {
+  const cells = smoothingCells(smoothing)
+  const span = Math.max(0, refSpan > 0 ? refSpan : to - from)
+  return { tau: span > 0 ? span / cells : 0, from, to, cells }
 }
 
 // Acumula el núcleo en un sentido. Devuelve, para cada instante de la rejilla,
@@ -150,8 +198,10 @@ export function trendCurve(xs, ys, params) {
   const { tau, from, to } = params || {}
   if (n < 2 || !(tau > 0)) return null
 
-  // Rejilla uniforme sobre lo que se ve.
-  const m = Math.max(2, Math.round(((to - from) / tau) * GRID_PER_CELL) + 1)
+  // Rejilla uniforme sobre lo que se ve, con paso tau/GRID_PER_CELL salvo que
+  // el tramo sea tan corto que haga falta el suelo.
+  const cellCount = Math.round(((to - from) / tau) * GRID_PER_CELL) + 1
+  const m = Math.min(GRID_MAX, Math.max(GRID_MIN, cellCount))
   const grid = new Float64Array(m)
   const step = (to - from) / (m - 1)
   for (let i = 0; i < m; i += 1) grid[i] = from + i * step
