@@ -81,10 +81,14 @@ const DEFAULT_METRIC = 'vpp'
 // pulso separa a ojo los grupos que interesa descartar.
 const DEFAULT_SCATTER = { x: 'vpp', y: 'kurtosis' }
 
-// Color de identidad de cada sensor. Sale de PALETTE —los dos primeros tonos,
-// que son los que la validación garantiza separables entre sí— y no del orden en
-// que se dibuje: un UHF es verde-azul esté solo o fusionado con tres series más.
-const SENSOR_COLOR = { uhf: PALETTE[0], ae: PALETTE[1] }
+// Color de identidad de cada sensor. Sale de PALETTE y no del orden en que se
+// dibuje: un UHF es azul esté solo o fusionado con tres series más.
+//
+// Ambos tonos salen de los CUATRO PRIMEROS de PALETTE a propósito: son los que
+// la validación garantiza separables entre todos los pares, incluida la visión
+// dicromática. UHF y AE se solapan en la misma tarjeta constantemente, así que
+// esa garantía es justo la que hace falta aquí.
+const SENSOR_COLOR = { uhf: PALETTE[0], ae: PALETTE[3] }
 
 // Ambiental. Aquí el color sí significa algo por convención —frío el agua,
 // caliente la temperatura—, así que se fija por magnitud y no por posición.
@@ -143,6 +147,7 @@ export default function App() {
   }, [])
 
   const restoreTests = useCallback(() => setHiddenTests(new Set()), [])
+
   const selectionRef = useRef(new Map()) // cardId -> Map(curve -> índices)
 
   const hdfInputRef = useRef(null)

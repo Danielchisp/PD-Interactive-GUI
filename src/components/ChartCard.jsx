@@ -26,12 +26,18 @@ import { snap } from '../constants.js'
 // Tonos de serie, en orden fijo. Se asignan por posición y NUNCA se ciclan: el
 // color identifica a la serie, así que el 9.º no se genera girando el círculo.
 //
-// El orden no es decorativo. Validado sobre la superficie del gráfico (--panel,
-// #0a0a0c) con el validador de paleta: los ocho pasan separación para daltonismo
-// entre contiguos, y los CUATRO PRIMEROS la pasan además entre todos los pares.
-// Eso es lo que importa aquí, porque un gráfico de métrica es una nube de puntos
-// donde cualquier par de series puede solaparse, no sólo las vecinas de la
-// leyenda. Reordenar esta lista invalida esa garantía.
+// El orden no es decorativo. Validado con el validador de paleta: los ocho pasan
+// separación para daltonismo entre contiguos, y los CUATRO PRIMEROS la pasan
+// además entre todos los pares. Eso es lo que importa aquí, porque un gráfico de
+// métrica es una nube de puntos donde cualquier par de series puede solaparse, no
+// sólo las vecinas de la leyenda. Reordenar esta lista invalida esa garantía.
+//
+// Esa separación es entre colores y no depende del fondo, así que sobrevivió al
+// cambio de superficie (era #0a0a0c, ahora --panel es blanco). Lo que sí había
+// que rehacer es el contraste de cada tono CONTRA la superficie: medido sobre
+// blanco, el peor es #c98500 con 3,07:1 y el mejor #008300 con 4,95:1, así que
+// los ocho pasan el 3:1 que pide WCAG 1.4.11 para elementos gráficos. Con poco
+// margen en el ámbar y el violeta: aclararlos los saca de norma.
 export const PALETTE = [
   '#3987e5', '#c98500', '#d55181', '#008300',
   '#9085e9', '#d95926', '#199e70', '#e66767',
@@ -39,7 +45,12 @@ export const PALETTE = [
 
 // Superficie y tinta del área de trazado, en sintonía con los tokens del CSS.
 // Plotly no lee variables CSS, así que los valores se repiten aquí a mano.
-const PLOT_THEME = { paper: '#0a0a0c', font: '#c9c9d2' }
+// `paper` es el `--panel` de la hoja: el gráfico y la tarjeta que lo enmarca son
+// la misma superficie, sin un escalón de color entre medias.
+//
+// La tinta no es `--text` sino un paso por debajo, y la línea de eje otro más:
+// los ejes acompañan a los datos, no compiten con ellos.
+const PLOT_THEME = { paper: '#ffffff', font: '#3a3d45', axis: '#a8adb8' }
 
 // Trazas que aporta la tendencia por cada serie: sólo la curva.
 const TREND_TRACES = 1
@@ -77,7 +88,7 @@ function oklchHex(L, C, hueDeg) {
 // fusionando más de ocho series en una tarjeta, y a esa altura la identidad ya la
 // lleva la leyenda. El ángulo áureo reparte el círculo sin repetir, y la
 // luminosidad y la croma quedan fijas dentro de la banda con la que se validó
-// PALETTE, así que un tono generado no desentona ni se pierde sobre el negro.
+// PALETTE, así que un tono generado no desentona ni se pierde sobre el blanco.
 export const spunColor = (n) => oklchHex(0.62, 0.15, (n * 137.508) % 360)
 
 const CONFIG = { displaylogo: false, responsive: false, scrollZoom: true }
@@ -213,8 +224,34 @@ function seriesSignature(series) {
 // que el área de trazado es predecible y se puede igualar entre gráficos.
 const Y2_MARGIN = 56
 
-function baseLayout(xTitle, card) {
-  const t = PLOT_THEME
+// Estira `ext` ([min, max]) para que abarque `arr`. Los no finitos se saltan:
+// un NaN suelto arrastraría el extremo y dejaría el eje en blanco.
+function growExtent(ext, arr) {
+  if (!arr) return ext
+  for (let i = 0; i < arr.length; i += 1) {
+    const v = arr[i]
+    if (!Number.isFinite(v)) continue
+    if (v < ext[0]) ext[0] = v
+    if (v > ext[1]) ext[1] = v
+  }
+  return ext
+}
+
+// Extremos → rango de eje, con aire alrededor para que los puntos de los bordes
+// no queden cortados por la mitad. `null` si no había ningún dato finito, y ahí
+// Plotly se queda con su automático (que sin datos da lo mismo).
+function padExtent([lo, hi], frac) {
+  if (!Number.isFinite(lo) || !Number.isFinite(hi)) return null
+  // Serie plana: sin esto el rango sería de ancho cero y Plotly no dibujaría.
+  if (lo === hi) {
+    const d = Math.abs(lo) * frac || 0.5
+    return [lo - d, hi + d]
+  }
+  const pad = (hi - lo) * frac
+  return [lo - pad, hi + pad]
+}
+
+function baseLayout(xTitle, card, t, ranges = {}) {
   const hasY2 = card.series.some((s) => s.axis === 'y2')
 
   // Alineación entre gráficos: el margen determina dónde empieza y acaba el
@@ -225,7 +262,14 @@ function baseLayout(xTitle, card) {
   // sueltas, para que apilar dos a mano dé el mismo resultado.
   const marginR = card.alignedMargin || card.groupId || hasY2 ? Y2_MARGIN : 14
 
-  // No gridlines and no zero lines (per design): just the axis ticks/labels.
+  // Sin rejilla y sin línea de cero, pero CON los dos ejes dibujados: sólo la
+  // vertical izquierda y la horizontal de abajo.
+  //
+  // `mirror` se queda en falso a propósito. Encendido, Plotly repite cada eje en
+  // el lado opuesto y el gráfico acaba enmarcado por los cuatro costados, que es
+  // justo lo que no se pide: dos líneas, no una caja.
+  const spine = { showgrid: false, zeroline: false, showline: true, linewidth: 1, mirror: false }
+
   const layout = {
     autosize: true,
     paper_bgcolor: t.paper,
@@ -234,19 +278,26 @@ function baseLayout(xTitle, card) {
     margin: { l: 56, r: marginR, t: 8, b: 34 },
     showlegend: true,
     legend: { orientation: 'h', y: -0.18, font: { size: 10 } },
+    // `linecolor` y no `color`: `color` teñiría de paso las etiquetas y los
+    // títulos, que se leen de la fuente del layout y tienen que seguir haciéndolo
+    // —si no, al exportar se quedarían claras sobre blanco.
     xaxis: {
-      showgrid: false,
-      zeroline: false,
+      ...spine,
+      linecolor: t.axis,
       title: { text: xTitle, font: { size: 10 } },
     },
-    yaxis: { showgrid: false, zeroline: false },
+    yaxis: { ...spine, linecolor: t.axis },
   }
 
-  // Rango fijo: es lo que mantiene alineados varios gráficos del mismo
-  // experimento aunque sus series cubran spans distintos.
-  if (card.xRange) {
-    layout.xaxis.range = [...card.xRange]
-  }
+  // Rangos fijos, calculados sobre los datos completos por quien llama.
+  //
+  // Fijarlos hace dos cosas de una vez: mantiene alineadas las tarjetas de un
+  // mismo experimento aunque sus series cubran spans distintos, y deja el
+  // encuadre quieto al descartar señales. Dar `range` apaga el `autorange` de
+  // Plotly, así que tampoco vuelve a ajustarse al hacer doble clic: el gráfico
+  // regresa siempre al ensayo completo.
+  if (ranges.x) layout.xaxis.range = [...ranges.x]
+  if (ranges.y) layout.yaxis.range = [...ranges.y]
 
   // El scatter se usa sobre todo para seleccionar y descartar, así que ése es
   // su gesto por defecto; zoom y lazo siguen en el modebar.
@@ -260,18 +311,24 @@ function baseLayout(xTitle, card) {
   const yPrimary = card.series.find((s) => s.axis !== 'y2')
   if (yPrimary) {
     layout.yaxis.title = { text: yPrimary.name, font: { size: 10 } }
-    if (yPrimary.color) layout.yaxis.color = yPrimary.color
+    // El eje toma el color de su serie, y con él la línea: es lo que dice a qué
+    // serie pertenece la escala cuando hay dos ejes verticales.
+    if (yPrimary.color) {
+      layout.yaxis.color = yPrimary.color
+      layout.yaxis.linecolor = yPrimary.color
+    }
   }
 
   if (hasY2) {
     const y2 = card.series.find((s) => s.axis === 'y2')
     layout.yaxis2 = {
+      ...spine,
+      linecolor: y2.color || t.axis,
       overlaying: 'y',
       side: 'right',
-      showgrid: false,
-      zeroline: false,
       title: { text: y2.name, font: { size: 10 } },
       ...(y2.color ? { color: y2.color } : {}),
+      ...(ranges.y2 ? { range: [...ranges.y2] } : {}),
     }
   }
 
@@ -425,11 +482,30 @@ export default function ChartCard({
     const fulls = []
     const masked = []
     const colors = []
+
+    // Extremos de los datos SIN máscara, uno por eje.
+    //
+    // Es lo que fija el encuadre: descartar señales no puede reescalar nada. Un
+    // gráfico es el ensayo completo, y si el eje se ajustara a lo que queda, dos
+    // tarjetas del mismo experimento dejarían de ser comparables en cuanto se
+    // filtrara una — y la propia tarjeta cambiaría de escala bajo los pies al
+    // descartar, que es justo cuando hay que ver si el recorte se llevó algo que
+    // no debía.
+    const xExt = [Infinity, -Infinity]
+    const yExt = [Infinity, -Infinity]
+    const y2Ext = [Infinity, -Infinity]
+
     const traces = card.series.map((s, i) => {
       const ds = getDataset(s.datasetId)
       const color = s.color || PALETTE[i % PALETTE.length]
       colors[i] = color
       const mode = s.mode || 'lines'
+
+      if (ds) {
+        growExtent(xExt, ds.data[s.xCol])
+        growExtent(s.axis === 'y2' ? y2Ext : yExt, ds.data[s.yCol])
+      }
+
       const { x, y, keep } = applyMask(
         ds ? ds.data[s.xCol] : [],
         ds ? ds.data[s.yCol] : [],
@@ -487,14 +563,19 @@ export default function ChartCard({
     let unsubscribe = () => {}
     let disposed = false
 
-    // Span completo de los datos, para cuando el eje está en automático.
-    let fullSpan = [Infinity, -Infinity]
-    for (const m of masked) {
-      if (m.x.length === 0) continue
-      if (m.x[0] < fullSpan[0]) fullSpan[0] = m.x[0]
-      if (m.x[m.x.length - 1] > fullSpan[1]) fullSpan[1] = m.x[m.x.length - 1]
+    // Rangos fijos del gráfico. `card.xRange` manda cuando viene: es el que
+    // alinea al píxel las tarjetas de un mismo experimento.
+    const ranges = {
+      x: card.xRange ? [...card.xRange] : padExtent(xExt, 0.01),
+      y: padExtent(yExt, 0.05),
+      y2: padExtent(y2Ext, 0.05),
     }
-    if (!Number.isFinite(fullSpan[0])) fullSpan = [0, 0]
+
+    // Span completo de los datos. Sale de los extremos sin máscara y no de lo que
+    // queda dibujado: el suavizado de la tendencia se mide contra él, así que si
+    // menguara al filtrar, descartar señales cambiaría también la curva.
+    let fullSpan = ranges.x || [xExt[0], xExt[1]]
+    if (!Number.isFinite(fullSpan[0]) || !Number.isFinite(fullSpan[1])) fullSpan = [0, 0]
 
     // Recalcula la tendencia para el tramo visible. Se recalcula al hacer zoom
     // sólo para volver a muestrear la rejilla dentro de lo que se ve; el
@@ -529,7 +610,7 @@ export default function ChartCard({
     const config = glRatio > 1
       ? { ...base, plotGlPixelRatio: (window.devicePixelRatio || 1) * glRatio }
       : base
-    Plotly.react(el, traces, baseLayout(xTitle, card), config).then(() => {
+    Plotly.react(el, traces, baseLayout(xTitle, card, PLOT_THEME, ranges), config).then(() => {
       if (disposed) return
       drawnRef.current = true
       Plotly.Plots.resize(el)

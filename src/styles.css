@@ -1,23 +1,36 @@
-/* Paleta única, sobre negro. No hay tema claro: los gráficos se miran a oscuras
-   y un solo juego de tokens evita que cada color exista por duplicado.
-   Los tonos de serie viven en ChartCard.jsx (PALETTE) y están validados contra
-   `--panel`, que es el fondo real del área de trazado. Aquí sólo va el cromo:
-   superficies, tinta y estados. */
+/* Paleta única, sobre claro. Un solo juego de tokens: no hay tema oscuro, así
+   que ningún color existe por duplicado. Aquí sólo va el cromo —superficies,
+   tinta y estados—; los tonos de serie viven en ChartCard.jsx (PALETTE).
+
+   `--panel` es la superficie contra la que se mide PALETTE: al pasarla de negro
+   a blanco hubo que rehacer ese contraste. Los ocho tonos siguen pasando; el
+   detalle y los números están en ChartCard.jsx, donde vive la lista. */
 :root {
-  --bg: #000000;
-  --panel: #0a0a0c;   /* superficie del gráfico: contra ésta se validó PALETTE */
-  --panel-2: #131318;
-  --line: #1e1e24;
-  --line-2: #2b2b33;
-  --text: #f0f0f2;
-  --muted: #8a8a95;
-  --accent: #35d0e0;
+  --bg: #eef0f3;      /* lienzo: gris muy claro, para que las tarjetas resalten */
+  --panel: #ffffff;   /* superficie del gráfico */
+  --panel-2: #f3f4f7;
+  --line: #e3e5ea;
+  --line-2: #ced2da;
+  --text: #1a1b20;
+  --muted: #6b6f7a;
   /* Cian de cromo, fuera del círculo que ocupan los tonos de serie: resaltar un
-     control no puede leerse como "esto es la serie 1". */
-  --accent-dim: #123c42;
-  --warn: #fab219;
-  --serious: #ec835a;
-  --danger: #d03b3b;
+     control no puede leerse como "esto es la serie 1". Sobre blanco hay que
+     bajarlo bastante —el cian claro de antes no se veía— sin acercarlo al azul
+     de la serie 1 (#3987e5), que es el vecino peligroso. */
+  --accent: #0d7d8c;
+  --accent-dim: #d7eff3;   /* fondo de estado activo; la tinta va en --on-accent-dim */
+  --warn: #9a6400;
+  --serious: #b8541f;
+  --danger: #c0271f;
+  /* Tinta sobre relleno. En claro no se puede dar por hecho que todo lo relleno
+     lleva texto blanco: --accent-dim es casi blanco y se traga el suyo. */
+  --on-accent: #ffffff;
+  --on-danger: #ffffff;
+  --on-accent-dim: #07424a;
+  /* Sombras. Sobre claro una sombra negra al 45% ensucia en vez de levantar, así
+     que van tenues y tiradas a azul, que es como se comporta la luz difusa. */
+  --shadow-card: 0 6px 20px rgba(26, 30, 46, 0.10);
+  --shadow-pop: 0 10px 32px rgba(26, 30, 46, 0.16);
   --font-mono: ui-monospace, "SF Mono", Menlo, monospace;
   --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
@@ -127,7 +140,7 @@ body {
   border: 1px solid var(--line-2);
   border-radius: 8px;
   padding: 4px;
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
+  box-shadow: var(--shadow-pop);
   animation: pop 90ms ease-out;
 }
 
@@ -156,7 +169,7 @@ body {
 
 .context-item:hover {
   background: var(--accent-dim);
-  color: #fff;
+  color: var(--on-accent-dim);
 }
 
 .context-glyph {
@@ -179,7 +192,7 @@ body {
   border: 1px solid var(--line-2);
   border-radius: 8px;
   overflow: hidden;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
+  box-shadow: var(--shadow-card);
 }
 
 /* Highlight shown on the target chart while another is dragged over it. */
@@ -205,14 +218,14 @@ body {
   z-index: 6;
   padding: 5px 14px;
   background: var(--accent);
-  color: #000;
+  color: var(--on-accent);
   font-family: var(--font-mono);
   font-size: 12px;
   font-weight: 600;
   letter-spacing: 0.06em;
   border-radius: 999px;
   pointer-events: none;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  box-shadow: var(--shadow-card);
 }
 
 .card-title {
@@ -257,7 +270,7 @@ body {
 }
 
 .card-close:hover {
-  color: #fff;
+  color: var(--on-danger);
   background: var(--danger);
 }
 
@@ -265,7 +278,7 @@ body {
   font-size: 13px;
 }
 .card-split:hover {
-  color: #fff;
+  color: var(--on-accent);
   background: var(--accent);
 }
 
@@ -301,7 +314,7 @@ body {
 }
 
 .card-drop:hover {
-  color: #fff;
+  color: var(--on-danger);
   border-color: var(--danger);
   background: var(--danger);
 }
@@ -339,7 +352,7 @@ body {
 .card-trend.on {
   background: var(--accent);
   border-color: var(--accent);
-  color: #000;
+  color: var(--on-accent);
 }
 
 /* Ajuste fino de la tendencia. Provisional: es para calibrar el suavizado
@@ -525,8 +538,55 @@ body {
 }
 
 .ds-hide:hover {
-  color: #fff;
+  color: var(--on-danger);
   background: var(--danger);
+}
+
+/* En la fila del experimento el toggle no se estira: así el botón de copiar
+   queda junto a la fecha y las cifras se van solas al borde derecho. */
+.ds-toggle-tight {
+  flex: 0 1 auto;
+}
+
+.ds-row-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  margin-left: auto;
+}
+
+/* Copiar el nombre del grupo. A diferencia de .ds-hide se queda siempre a la
+   vista, sólo que apagado: un botón que hay que descubrir pasando el ratón no
+   lo encuentra nadie. */
+.ds-copy {
+  display: flex;
+  align-items: center;
+  flex: none;
+  background: none;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 11px;
+  line-height: 1;
+  padding: 3px 5px;
+  border-radius: 4px;
+  opacity: 0.55;
+}
+
+.ds-row:hover .ds-copy,
+.ds-copy:focus-visible,
+.ds-copy.is-copied {
+  opacity: 1;
+}
+
+.ds-copy:hover {
+  color: var(--text);
+  background: var(--line);
+}
+
+.ds-copy.is-copied {
+  color: var(--accent);
 }
 
 .ds-restore {
@@ -595,7 +655,7 @@ body {
 }
 .ds-signal:hover {
   background: var(--accent-dim);
-  color: #fff;
+  color: var(--on-accent-dim);
 }
 .ds-signal:active {
   cursor: grabbing;
@@ -622,15 +682,15 @@ body {
   left: 50%;
   transform: translateX(-50%);
   z-index: 11000;
-  background: color-mix(in srgb, var(--danger) 16%, #000);
+  background: color-mix(in srgb, var(--danger) 10%, #fff);
   border: 1px solid var(--danger);
-  color: #f5b9b9;
+  color: var(--danger);
   padding: 10px 16px;
   border-radius: 8px;
   font-family: var(--font-mono);
   font-size: 12px;
   cursor: pointer;
-  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.4);
+  box-shadow: var(--shadow-pop);
 }
 
 /* --- Carga de un gráfico ---------------------------------------------------- */

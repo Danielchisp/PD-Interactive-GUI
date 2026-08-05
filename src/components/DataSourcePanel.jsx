@@ -1,4 +1,4 @@
-import { useCallback, useContext, useState } from 'react'
+import { useCallback, useContext, useEffect, useRef, useState } from 'react'
 import { Rnd } from 'react-rnd'
 import { hdf5 } from '../hdf5/hdf5Client.js'
 import { CanvasViewContext } from './Canvas.jsx'
@@ -201,11 +201,20 @@ function TestNode({ test, plotted = false, editedGroups = new Map(), stats, onHi
         }}
         title="Drag to the canvas for the full experiment overview"
       >
-        <button className="ds-toggle" onClick={toggle}>
+        {/* El toggle no se estira, para que el botón de copiar caiga pegado a la
+            fecha y no al otro extremo de la fila; las cifras y las marcas se van
+            solas al borde derecho. Copiar va fuera del toggle porque un <button>
+            no puede anidar otro. */}
+        <button className="ds-toggle ds-toggle-tight" onClick={toggle}>
           <Caret open={open} />
           <span className="ds-label" title={test.name}>
             {shortDate}
           </span>
+        </button>
+        {/* Copia el nombre completo del grupo en el HDF5, no la fecha recortada
+            que se ve: es el que sirve para buscarlo en un script o en el archivo. */}
+        <CopyButton text={test.name} />
+        <span className="ds-row-meta">
           <span className="ds-stats">
             {duration && <span className="ds-count">{duration}</span>}
             {size && <span className="ds-count ds-size">{size}</span>}
@@ -214,7 +223,7 @@ function TestNode({ test, plotted = false, editedGroups = new Map(), stats, onHi
           {plotted && (
             <span className="ds-plotted-dot" title="Plotted on the canvas" aria-label="plotted" />
           )}
-        </button>
+        </span>
         <button
           className="ds-hide"
           onMouseDown={(e) => e.stopPropagation()}
@@ -416,6 +425,79 @@ function EditedMark({ count, scope }) {
     >
       ✂
     </span>
+  )
+}
+
+// Dos hojas superpuestas, dibujadas a mano. Un carácter (⧉, 🗐) depende de que la
+// fuente del sistema lo tenga —en Windows se queda en blanco—; el SVG se ve igual
+// en todas partes y hereda el color del botón.
+function CopyGlyph() {
+  return (
+    <svg viewBox="0 0 14 14" width="11" height="11" aria-hidden="true" focusable="false">
+      <rect
+        x="1.5"
+        y="1.5"
+        width="8"
+        height="8"
+        rx="1.5"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.3"
+      />
+      <rect
+        x="4.5"
+        y="4.5"
+        width="8"
+        height="8"
+        rx="1.5"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.3"
+      />
+    </svg>
+  )
+}
+
+// Copiar el nombre del grupo al portapapeles. El acuse va en el propio ícono
+// (✓ un segundo) porque la fila no tiene sitio para un aviso, y sin él no habría
+// forma de saber si el clic hizo algo.
+function CopyButton({ text }) {
+  const [copied, setCopied] = useState(false)
+  const timer = useRef(null)
+
+  useEffect(() => () => clearTimeout(timer.current), [])
+
+  const copy = useCallback(
+    async (e) => {
+      e.stopPropagation()
+      try {
+        await navigator.clipboard.writeText(text)
+      } catch {
+        // Sin permiso o sin contexto seguro: no hay nada que reintentar, y la
+        // marca de copiado mentiría.
+        return
+      }
+      setCopied(true)
+      clearTimeout(timer.current)
+      timer.current = setTimeout(() => setCopied(false), 1000)
+    },
+    [text],
+  )
+
+  return (
+    <button
+      className={`ds-copy${copied ? ' is-copied' : ''}`}
+      // La fila entera es arrastrable; sin esto, el ratón sobre el botón empieza
+      // un drag en vez de dejar que llegue el clic.
+      draggable={false}
+      onDragStart={(e) => e.preventDefault()}
+      onMouseDown={(e) => e.stopPropagation()}
+      onClick={copy}
+      title={copied ? 'Copied' : `Copy "${text}"`}
+      aria-label={`Copy ${text} to the clipboard`}
+    >
+      {copied ? '✓' : <CopyGlyph />}
+    </button>
   )
 }
 

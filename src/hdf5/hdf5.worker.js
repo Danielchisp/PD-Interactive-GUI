@@ -511,6 +511,89 @@ function readGroupSummary(testName, path) {
   }
 }
 
+// Salto que ninguna de las dos magnitudes puede dar entre dos muestras seguidas:
+// 10 °C o 10 puntos de humedad relativa. Ambas son continuas y el aire de un
+// ensayo tiene inercia, así que un escalón así no es física, es la adquisición.
+//
+// El umbral está holgadamente por encima del ruido real: en el ensayo largo de
+// `master.hdf5` la diferencia entre muestras consecutivas tiene mediana 0,02 y
+// percentil 99,9 de 0,65. Entre ese 0,65 y los saltos de verdad (17 a 84) no hay
+// nada, así que dónde caiga el corte exacto dentro de ese hueco da igual.
+const ENV_JUMP = 10
+
+// Cuántas muestras seguidas se aceptan como fallo antes de creerse el valor.
+//
+// Sin este tope, un salto que NO vuelve —un sensor recalibrado a medio ensayo—
+// dejaría todo lo que viene después midiéndose contra un valor viejo y se
+// reescribiría el resto de la serie. Con ~1 muestra/s, cinco muestras es un
+// pinchazo; lo que dura más ya es el nuevo nivel y se respeta, aunque llegara de
+// golpe. Los artefactos observados duran una sola muestra.
+const ENV_MAX_RUN = 5
+
+// Repara los pinchazos de una serie ambiental, in situ.
+//
+// Los fallos observados son muestras sueltas que se desploman a un entero
+// pequeño (7, 8 o 9 % de humedad; 1 o 2 °C) y vuelven al valor bueno en la
+// muestra siguiente. Cada una se sustituye por el promedio de los extremos del
+// tramo: el último valor bueno de antes y el primero de después. Con un tramo de
+// una muestra eso es exactamente interpolar el punto que faltaba.
+//
+// En los bordes no hay dos extremos que promediar, así que se copia el único que
+// hay — extrapolar plano es lo más flojo que se puede afirmar sobre un dato que
+// no se tiene.
+//
+// El HDF5 no se toca: esto opera sobre las copias que el worker acaba de leer.
+function repairEnvSeries(v) {
+  if (!v || v.length < 3) return 0
+
+  let repaired = 0
+  let lastGood = null
+  let i = 0
+
+  // Primer valor finito: sirve de referencia inicial. Si la serie empieza con un
+  // pinchazo, se arregla al cerrarse el tramo contra el primer bueno de después.
+  while (i < v.length && !Number.isFinite(v[i])) i += 1
+  if (i >= v.length) return 0
+  lastGood = v[i]
+
+  for (i += 1; i < v.length; i += 1) {
+    const value = v[i]
+    if (Number.isFinite(value) && Math.abs(value - lastGood) <= ENV_JUMP) {
+      lastGood = value
+      continue
+    }
+
+    // Arranca un tramo sospechoso: se extiende mientras siga lejos del último
+    // valor bueno, hasta el tope o hasta el final de la serie.
+    let end = i
+    while (
+      end < v.length &&
+      end - i < ENV_MAX_RUN &&
+      (!Number.isFinite(v[end]) || Math.abs(v[end] - lastGood) > ENV_JUMP)
+    ) {
+      end += 1
+    }
+
+    const closes = end < v.length && Number.isFinite(v[end])
+    if (!closes && end - i >= ENV_MAX_RUN) {
+      // No vuelve dentro del tope: es un nivel nuevo, no un pinchazo. Se acepta
+      // tal cual y la referencia pasa a ser el primer valor del tramo.
+      lastGood = Number.isFinite(v[i]) ? v[i] : lastGood
+      continue
+    }
+
+    const fill = closes ? (lastGood + v[end]) / 2 : lastGood
+    for (let k = i; k < end; k += 1) {
+      v[k] = fill
+      repaired += 1
+    }
+    lastGood = closes ? v[end] : fill
+    i = end
+  }
+
+  return repaired
+}
+
 function readHumidityData(testName) {
   const g = h5file.get(`${testName}/humidity`)
   const humDset = g && h5file.get(`${testName}/humidity/humidity`)
@@ -536,6 +619,21 @@ function readHumidityData(testName) {
 
   const nSamples = humidity.length
 
+  // Se corrige aquí, en el único sitio por el que pasan las dos lecturas de
+  // ambiental, y no en cada gráfico: así ninguna vista puede quedarse con la
+  // serie cruda. Es sobre las copias que se acaban de leer — el archivo sigue
+  // abierto en sólo lectura y no se modifica.
+  const repaired = {
+    humidity: repairEnvSeries(humidity),
+    temperature: repairEnvSeries(temperature),
+  }
+  if (repaired.humidity > 0 || repaired.temperature > 0) {
+    console.info(
+      `[env] ${testName}: reparadas ${repaired.humidity} muestras de humedad y ` +
+        `${repaired.temperature} de temperatura (saltos > ${ENV_JUMP})`,
+    )
+  }
+
   const transfer = [humidity.buffer, timestamps.buffer]
   if (temperature) transfer.push(temperature.buffer)
 
@@ -544,6 +642,7 @@ function readHumidityData(testName) {
     temperature,
     timestamps,
     nSamples,
+    repaired,
     transfer,
   }
 }
